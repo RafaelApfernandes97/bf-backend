@@ -1,0 +1,19 @@
+{
+  "name": "backend-fotos",
+  "description": "Backend API para sistema de fotos de ballet",
+  "type": "service",
+  "image": "node:18-alpine",
+  "ports": [
+    {
+      "port": 3001,
+      "protocol": "http"
+    }
+  ],
+  "environment": [
+    "NODE_ENV=production",
+    "PORT=3001"
+  ],
+  "volumes": [],
+  "networks": [],
+  "restart": "unless-stopped"
+} 
