@@ -65,7 +65,9 @@ async function initializeApp() {
 // Inicializa a aplicação
 initializeApp();
 
-mongoose.connect('mongodb://admin:admin@37.60.224.137:3060/?tls=false', {
+// Conexão com MongoDB usando variável de ambiente
+const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/fotos-ballet';
+mongoose.connect(mongoUri, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 });
@@ -82,5 +84,11 @@ mongoose.connection.on('error', (err) => {
 require('./models/evento');
 require('./models/usuario');
 require('./models/tabelaPreco');
+
+// Inicializa o servidor
+const port = process.env.PORT || 3001;
+app.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 Backend rodando em http://0.0.0.0:${port} (env: ${process.env.NODE_ENV})`);
+});
 
 module.exports = app;
