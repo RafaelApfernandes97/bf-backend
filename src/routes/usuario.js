@@ -161,6 +161,8 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
     console.log('[WhatsApp] Pedido salvo no banco de dados');
     
     // Montar mensagem com ID do pedido
+    // Inserir caractere invisível após o @ para evitar link no WhatsApp
+    const emailTexto = user.email.replace('@', '@\u200B');
     const mensagem = `Seu pedido foi recebido aqui no Ballet em Foco! ✨
 
 Nº do Pedido: ${pedidoId}
@@ -168,7 +170,7 @@ Evento: ${evento}
 
 Dados para nota fiscal:
 Nome: ${user.nome}
-Email: ${user.email}
+Email: ${emailTexto}
 Telefone: ${user.telefone}
 CPF: ${user.cpfCnpj}
 Endereço: ${user.rua}, ${user.numero} - ${user.bairro}, ${user.cidade} - ${user.estado}, CEP: ${user.cep}
