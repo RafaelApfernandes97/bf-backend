@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const Usuario = require('../models/usuario');
 const Pedido = require('../models/pedido');
 const { sendOrderSummary } = require('../services/evolutionapi');
+const { gerarUrlAssinada } = require('../services/minio');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'segredo123';
@@ -189,6 +190,26 @@ router.get('/meus-pedidos', authMiddleware, async (req, res) => {
   } catch (e) {
     console.error('[Pedidos] Erro ao buscar pedidos:', e);
     res.status(500).json({ error: 'Erro ao buscar pedidos' });
+  }
+});
+
+// Rota para gerar URL assinada para foto do pedido
+router.get('/foto-url/:evento/:coreografia/:nome', authMiddleware, async (req, res) => {
+  try {
+    const { evento, coreografia, nome } = req.params;
+    console.log('[Foto URL] Parâmetros recebidos:', { evento, coreografia, nome });
+    
+    const key = `${evento}/${coreografia}/${nome}`;
+    console.log('[Foto URL] Key construída:', key);
+    
+    // Gerar URL assinada válida por 1 hora
+    const urlAssinada = gerarUrlAssinada(key, 3600);
+    console.log('[Foto URL] URL assinada gerada:', urlAssinada);
+    
+    res.json({ url: urlAssinada });
+  } catch (e) {
+    console.error('[Foto URL] Erro ao gerar URL assinada:', e);
+    res.status(500).json({ error: 'Erro ao gerar URL da foto' });
   }
 });
 

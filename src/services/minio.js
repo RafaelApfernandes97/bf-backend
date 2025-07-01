@@ -124,16 +124,18 @@ async function listarFotos(evento, coreografia) {
         Prefix: prefix,
       }).promise();
 
+      // Monta a URL pública (sem assinatura)
+      const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
       fotos = (data.Contents || [])
         .filter(obj => !obj.Key.endsWith('/'))
         .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
         .map(obj => ({
           nome: obj.Key.replace(prefix, ''),
-          url: gerarUrlAssinada(obj.Key, 3600), // 1 hora
+          url: `${endpoint}/${bucket}/${encodeURIComponent(evento)}/${encodeURIComponent(coreografia)}/${encodeURIComponent(obj.Key.replace(prefix, ''))}`,
         }));
 
-      // Salva no cache por 15 minutos (URLs assinadas expiram em 1h)
-      await setCache(cacheKey, fotos, 900);
+      // Salva no cache por 1 hora (URL pública não expira)
+      await setCache(cacheKey, fotos, 3600);
     } catch (error) {
       console.error('Erro ao listar fotos:', error);
       throw error;
