@@ -161,7 +161,25 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
     console.log('[WhatsApp] Pedido salvo no banco de dados');
     
     // Montar mensagem com ID do pedido
-    const mensagem = `Resumo do Pedido\n\nID do Pedido: ${pedidoId}\nEvento: ${evento}\n\nNome: ${user.nome}\nEmail: ${user.email}\nTelefone: ${user.telefone}\nCPF: ${user.cpfCnpj}\nEndereço: ${user.rua}, ${user.numero} - ${user.bairro}, ${user.cidade} - ${user.estado}, CEP: ${user.cep}\n\nImagens Selecionadas: ${fotos.length}\nValor Unitário: R$ ${valorUnitario.toFixed(2).replace('.', ',')}\nValor Total: R$ ${valorTotal.toFixed(2).replace('.', ',')}\n\nFotos:\n${fotos.map(f => `- ${f.nome}${f.coreografia ? ` (${f.coreografia})` : ''}`).join('\n')}`;
+    const mensagem = `Seu pedido foi recebido aqui no Ballet em Foco! ✨
+
+Nº do Pedido: ${pedidoId}
+Evento: ${evento}
+
+Dados para nota fiscal:
+Nome: ${user.nome}
+Email: ${user.email}
+Telefone: ${user.telefone}
+CPF: ${user.cpfCnpj}
+Endereço: ${user.rua}, ${user.numero} - ${user.bairro}, ${user.cidade} - ${user.estado}, CEP: ${user.cep}
+
+Fotos:
+${fotos.map(f => `- ${f.nome}${f.coreografia ? ` (${f.coreografia})` : ''}`).join('\n')}
+
+Imagens Selecionadas: ${fotos.length}
+Valor Unitário: R$ ${valorUnitario.toFixed(2).replace('.', ',')}
+
+Valor Total: R$ ${valorTotal.toFixed(2).replace('.', ',')}`;
     console.log('[WhatsApp] Mensagem montada:', mensagem);
     
     const numero = user.telefone; // O serviço evolutionapi.js adiciona o +55 automaticamente
@@ -170,6 +188,18 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
     console.log('[WhatsApp] Chamando sendOrderSummary...');
     await sendOrderSummary({ numero, mensagem });
     console.log('[WhatsApp] sendOrderSummary executado com sucesso');
+    
+    // Enviar segunda mensagem sobre forma de pagamento após 5 segundos
+    setTimeout(async () => {
+      try {
+        const mensagemPagamento = 'Qual seria a melhor forma de pagamento, cartão ou pix?';
+        console.log('[WhatsApp] Enviando mensagem sobre pagamento...');
+        await sendOrderSummary({ numero, mensagem: mensagemPagamento });
+        console.log('[WhatsApp] Mensagem sobre pagamento enviada com sucesso');
+      } catch (error) {
+        console.error('[WhatsApp] Erro ao enviar mensagem sobre pagamento:', error);
+      }
+    }, 5000);
     
     res.json({ ok: true, pedidoId: pedidoId });
   } catch (e) {
