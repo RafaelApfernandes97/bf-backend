@@ -226,7 +226,7 @@ router.get('/meus-pedidos', authMiddleware, async (req, res) => {
 });
 
 // Rota para gerar URL assinada para foto do pedido
-router.get('/foto-url/:evento/:coreografia/:nome', authMiddleware, async (req, res) => {
+router.get('/foto-url/:evento/:coreografia/:nome', async (req, res) => {
   try {
     const { evento, coreografia, nome } = req.params;
     console.log('[Foto URL] Parâmetros recebidos:', { evento, coreografia, nome });
