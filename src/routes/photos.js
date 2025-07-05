@@ -32,6 +32,18 @@ router.get('/eventos/:evento/coreografias', async (req, res) => {
   }
 });
 
+// Lista coreografias dentro de um dia específico de um evento
+router.get('/eventos/:evento/:dia/coreografias', async (req, res) => {
+  const { evento, dia } = req.params;
+  try {
+    const coreografias = await listarCoreografias(`${evento}/${dia}`);
+    res.json({ coreografias });
+  } catch (error) {
+    console.error('Erro ao listar coreografias do dia:', error);
+    res.status(500).json({ error: 'Erro ao listar coreografias do dia' });
+  }
+});
+
 // Lista fotos dentro de uma coreografia
 router.get('/eventos/:evento/:coreografia/fotos', async (req, res) => {
   const { evento, coreografia } = req.params;
