@@ -4,7 +4,8 @@ const {
   listarEventos, 
   listarCoreografias, 
   listarFotos,
-  preCarregarDadosPopulares 
+  preCarregarDadosPopulares,
+  listarPastasEFotos
 } = require('../services/minio');
 const { invalidateCache, generateCacheKey } = require('../services/cache');
 
@@ -101,6 +102,19 @@ router.get('/cache/stats', async (req, res) => {
   } catch (error) {
     console.error('Erro ao obter estatísticas:', error);
     res.status(500).json({ error: 'Erro ao obter estatísticas' });
+  }
+});
+
+// Rota recursiva: lista subpastas e fotos de qualquer caminho
+router.get('/eventos/pasta/*', async (req, res) => {
+  // O caminho após /eventos/pasta/ pode conter barras
+  const caminho = req.params[0] || '';
+  try {
+    const resultado = await listarPastasEFotos(caminho);
+    res.json(resultado);
+  } catch (error) {
+    console.error('Erro ao listar pastas/fotos recursivamente:', error);
+    res.status(500).json({ error: 'Erro ao listar pastas/fotos' });
   }
 });
 

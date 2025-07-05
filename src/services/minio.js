@@ -180,6 +180,47 @@ async function preCarregarDadosPopulares() {
   }
 }
 
+// Lista subpastas e fotos de qualquer caminho
+async function listarPastasEFotos(caminho) {
+  const cacheKey = generateCacheKey('listarPastasEFotos', caminho);
+  let resultado = await getFromCache(cacheKey);
+
+  if (!resultado) {
+    try {
+      const prefix = caminho ? `${caminho.replace(/\/$/, '')}/` : '';
+      const data = await s3.listObjectsV2({
+        Bucket: bucket,
+        Prefix: prefix,
+        Delimiter: '/',
+      }).promise();
+
+      // Subpastas
+      const subpastas = (data.CommonPrefixes || []).map(p => {
+        const nome = p.Prefix.replace(prefix, '').replace(/\/$/, '');
+        return nome;
+      });
+
+      // Fotos
+      const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
+      const fotos = (data.Contents || [])
+        .filter(obj => !obj.Key.endsWith('/'))
+        .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
+        .map(obj => ({
+          nome: obj.Key.replace(prefix, ''),
+          url: `${endpoint}/${bucket}/${encodeURIComponent(prefix)}${encodeURIComponent(obj.Key.replace(prefix, ''))}`,
+        }));
+
+      resultado = { subpastas, fotos };
+      await setCache(cacheKey, resultado, 1800);
+    } catch (error) {
+      console.error('Erro ao listar pastas e fotos:', error);
+      throw error;
+    }
+  }
+
+  return resultado;
+}
+
 module.exports = { 
   s3, 
   bucket, 
@@ -187,5 +228,6 @@ module.exports = {
   listarEventos,
   listarCoreografias,
   listarFotos,
-  preCarregarDadosPopulares
+  preCarregarDadosPopulares,
+  listarPastasEFotos
 };
