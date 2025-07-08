@@ -245,6 +245,46 @@ router.get('/foto-url/:evento/:coreografia/:nome', async (req, res) => {
   }
 });
 
+// Rota para foto URL com dia (eventos multi-dia)
+router.get('/foto-url/:evento/:dia/:coreografia/:nome', async (req, res) => {
+  try {
+    const { evento, dia, coreografia, nome } = req.params;
+    console.log('[Foto URL Dia] Parâmetros recebidos:', { evento, dia, coreografia, nome });
+    
+    const key = `${evento}/${dia}/${coreografia}/${nome}`;
+    console.log('[Foto URL Dia] Key construída:', key);
+    
+    // Gerar URL assinada válida por 1 hora
+    const urlAssinada = gerarUrlAssinada(key, 3600);
+    console.log('[Foto URL Dia] URL assinada gerada:', urlAssinada);
+    
+    res.json({ url: urlAssinada });
+  } catch (e) {
+    console.error('[Foto URL Dia] Erro ao gerar URL assinada:', e);
+    res.status(500).json({ error: 'Erro ao gerar URL da foto' });
+  }
+});
+
+// Rota para foto URL com caminho completo (evento/dia/pasta/coreografia/nome)
+router.get('/foto-url/:evento/:dia/:pasta/:coreografia/:nome', async (req, res) => {
+  try {
+    const { evento, dia, pasta, coreografia, nome } = req.params;
+    console.log('[Foto URL Completa] Parâmetros recebidos:', { evento, dia, pasta, coreografia, nome });
+    
+    const key = `${evento}/${dia}/${pasta}/${coreografia}/${nome}`;
+    console.log('[Foto URL Completa] Key construída:', key);
+    
+    // Gerar URL assinada válida por 1 hora
+    const urlAssinada = gerarUrlAssinada(key, 3600);
+    console.log('[Foto URL Completa] URL assinada gerada:', urlAssinada);
+    
+    res.json({ url: urlAssinada });
+  } catch (e) {
+    console.error('[Foto URL Completa] Erro ao gerar URL assinada:', e);
+    res.status(500).json({ error: 'Erro ao gerar URL da foto' });
+  }
+});
+
 // Rota para buscar detalhes de um pedido específico
 router.get('/pedido/:pedidoId', authMiddleware, async (req, res) => {
   try {

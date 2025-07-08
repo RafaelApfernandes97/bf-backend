@@ -55,16 +55,18 @@ async function listarEventos() {
   return eventos;
 }
 
-// Lista coreografias com cache
-async function listarCoreografias(evento) {
-  const cacheKey = generateCacheKey('evento', evento, 'coreografias');
+// Lista coreografias com cache (suporta eventos com dias)
+async function listarCoreografias(evento, dia = null) {
+  const cacheKey = dia ? 
+    generateCacheKey('evento', evento, 'dia', dia, 'coreografias') : 
+    generateCacheKey('evento', evento, 'coreografias');
   
   // Tenta obter do cache primeiro
   let coreografias = await getFromCache(cacheKey);
   
   if (!coreografias) {
     try {
-      const prefix = `${evento}/`;
+      const prefix = dia ? `${evento}/${dia}/` : `${evento}/`;
       const data = await s3.listObjectsV2({
         Bucket: bucket,
         Prefix: prefix,
@@ -74,7 +76,7 @@ async function listarCoreografias(evento) {
       coreografias = await Promise.all(
         (data.CommonPrefixes || []).map(async (p) => {
           const nome = p.Prefix.replace(prefix, '').replace('/', '');
-          const pastaCoreografia = `${evento}/${nome}/`;
+          const pastaCoreografia = dia ? `${evento}/${dia}/${nome}/` : `${evento}/${nome}/`;
 
           // Lista objetos dentro da coreografia
           const objetos = await s3.listObjectsV2({
@@ -109,30 +111,46 @@ async function listarCoreografias(evento) {
   return coreografias;
 }
 
-// Lista fotos com cache
-async function listarFotos(evento, coreografia) {
-  const cacheKey = generateCacheKey('evento', evento, 'coreografia', coreografia, 'fotos');
+// Lista fotos com cache (suporta eventos com dias)
+async function listarFotos(evento, coreografia, dia = null) {
+  const cacheKey = dia ? 
+    generateCacheKey('evento', evento, 'dia', dia, 'coreografia', coreografia, 'fotos') : 
+    generateCacheKey('evento', evento, 'coreografia', coreografia, 'fotos');
   
   // Tenta obter do cache primeiro
   let fotos = await getFromCache(cacheKey);
+  console.log('[MinIO] listarFotos - Cache key:', cacheKey);
+  console.log('[MinIO] listarFotos - Fotos do cache:', fotos ? fotos.length : 'null');
   
   if (!fotos) {
     try {
-      const prefix = `${evento}/${coreografia}/`;
+      const prefix = dia ? `${evento}/${dia}/${coreografia}/` : `${evento}/${coreografia}/`;
+      console.log('[MinIO] listarFotos - Prefix:', prefix);
+      console.log('[MinIO] listarFotos - Bucket:', bucket);
+      
       const data = await s3.listObjectsV2({
         Bucket: bucket,
         Prefix: prefix,
       }).promise();
+      
+      console.log('[MinIO] listarFotos - Objetos encontrados:', data.Contents?.length || 0);
 
       // Monta a URL pública (sem assinatura)
       const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
       fotos = (data.Contents || [])
         .filter(obj => !obj.Key.endsWith('/'))
         .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
-        .map(obj => ({
-          nome: obj.Key.replace(prefix, ''),
-          url: `${endpoint}/${bucket}/${encodeURIComponent(evento)}/${encodeURIComponent(coreografia)}/${encodeURIComponent(obj.Key.replace(prefix, ''))}`,
-        }));
+        .map(obj => {
+          const nomeArquivo = obj.Key.replace(prefix, '');
+          const urlPath = dia ? 
+            `${encodeURIComponent(evento)}/${encodeURIComponent(dia)}/${encodeURIComponent(coreografia)}/${encodeURIComponent(nomeArquivo)}` :
+            `${encodeURIComponent(evento)}/${encodeURIComponent(coreografia)}/${encodeURIComponent(nomeArquivo)}`;
+          
+          return {
+            nome: nomeArquivo,
+            url: `${endpoint}/${bucket}/${urlPath}`,
+          };
+        });
 
       // Salva no cache por 1 hora (URL pública não expira)
       await setCache(cacheKey, fotos, 3600);
