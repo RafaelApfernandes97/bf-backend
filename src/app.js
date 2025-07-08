@@ -8,7 +8,14 @@ require('dotenv').config();
 const app = express();
 
 // Middlewares
-app.use(cors());
+app.use(cors({
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:3000',
+    'https://seu-frontend-em-producao.com' // ajuste conforme necessário
+  ],
+  credentials: true,
+}));
 app.use(express.json());
 
 // Middleware para monitoramento de performance
