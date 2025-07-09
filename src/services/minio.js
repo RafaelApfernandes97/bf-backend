@@ -55,6 +55,34 @@ async function listarEventos() {
   return eventos;
 }
 
+// Função recursiva para contar todas as fotos em uma pasta e subpastas
+async function contarFotosRecursivo(prefix) {
+  let total = 0;
+  let ContinuationToken = undefined;
+  do {
+    const data = await s3.listObjectsV2({
+      Bucket: bucket,
+      Prefix: prefix,
+      ContinuationToken,
+    }).promise();
+
+    // Conta fotos nesta pasta
+    total += (data.Contents || []).filter(obj =>
+      /\.(jpe?g|png|webp)$/i.test(obj.Key)
+    ).length;
+
+    // Busca subpastas
+    const subpastas = (data.CommonPrefixes || []).map(p => p.Prefix);
+    for (const subpasta of subpastas) {
+      total += await contarFotosRecursivo(subpasta);
+    }
+
+    ContinuationToken = data.IsTruncated ? data.NextContinuationToken : undefined;
+  } while (ContinuationToken);
+
+  return total;
+}
+
 // Lista coreografias com cache (suporta eventos com dias)
 async function listarCoreografias(evento, dia = null) {
   const cacheKey = dia ? 
@@ -78,7 +106,10 @@ async function listarCoreografias(evento, dia = null) {
           const nome = p.Prefix.replace(prefix, '').replace('/', '');
           const pastaCoreografia = dia ? `${evento}/${dia}/${nome}/` : `${evento}/${nome}/`;
 
-          // Lista objetos dentro da coreografia
+          // Conta fotos recursivamente
+          const quantidade = await contarFotosRecursivo(pastaCoreografia);
+
+          // Lista objetos dentro da coreografia para pegar capa
           const objetos = await s3.listObjectsV2({
             Bucket: bucket,
             Prefix: pastaCoreografia,
@@ -95,7 +126,7 @@ async function listarCoreografias(evento, dia = null) {
           return {
             nome,
             capa: imagemAleatoria,
-            quantidade: fotos.length,
+            quantidade,
           };
         })
       );

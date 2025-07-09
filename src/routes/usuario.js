@@ -165,7 +165,6 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
     const emailTexto = user.email.replace('@', '@\u200B');
     const mensagem = `Seu pedido foi recebido aqui no Ballet em Foco! ✨
 
-    instagram.com/balletemfoco
 
 Nº do Pedido: ${pedidoId}
 Evento: ${evento}
@@ -178,7 +177,7 @@ CPF: ${user.cpfCnpj}
 Endereço: ${user.rua}, ${user.numero} - ${user.bairro}, ${user.cidade} - ${user.estado}, CEP: ${user.cep}
 
 Fotos:
-${fotos.map(f => `- ${f.nome}${f.coreografia ? ` (${f.coreografia})` : ''}`).join('\n')}
+${fotos.map(f => `- ${f.nome}`).join('\n')}
 
 Imagens Selecionadas: ${fotos.length}
 Valor Unitário: R$ ${valorUnitario.toFixed(2).replace('.', ',')}
