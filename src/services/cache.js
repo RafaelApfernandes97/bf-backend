@@ -4,9 +4,9 @@ require('dotenv').config();
 
 // Cache em memória para dados muito acessados
 const memoryCache = new NodeCache({ 
-  stdTTL: 300, // 5 minutos
-  checkperiod: 60, // verifica a cada 1 minuto
-  maxKeys: 1000 // máximo de 1000 chaves
+  stdTTL: 1800, // 30 minutos (aumentado)
+  checkperiod: 120, // verifica a cada 2 minutos
+  maxKeys: 2000 // máximo de 2000 chaves (aumentado)
 });
 
 // Cliente Redis

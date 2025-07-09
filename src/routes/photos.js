@@ -4,7 +4,9 @@ const {
   listarEventos, 
   listarCoreografias, 
   listarFotos,
+  listarFotosPorCaminho,
   preCarregarDadosPopulares,
+  aquecerCacheEvento,
   s3,
   bucket,
   gerarUrlAssinada
@@ -15,6 +17,14 @@ const { invalidateCache, generateCacheKey } = require('../services/cache');
 router.get('/eventos', async (req, res) => {
   try {
     const eventos = await listarEventos();
+    
+    // Aquece cache do primeiro evento em background
+    if (eventos.length > 0) {
+      setTimeout(() => {
+        aquecerCacheEvento(eventos[0]);
+      }, 100);
+    }
+    
     res.json({ eventos });
   } catch (error) {
     console.error('Erro ao listar eventos:', error);
@@ -143,6 +153,23 @@ router.post('/pre-carregar', async (req, res) => {
   } catch (error) {
     console.error('Erro ao iniciar pré-carregamento:', error);
     res.status(500).json({ error: 'Erro ao iniciar pré-carregamento' });
+  }
+});
+
+// Rota para aquecer cache de um evento específico
+router.post('/eventos/:evento/aquecer-cache', async (req, res) => {
+  try {
+    const { evento } = req.params;
+    
+    // Executa em background para não bloquear a resposta
+    setTimeout(() => {
+      aquecerCacheEvento(evento);
+    }, 100);
+    
+    res.json({ message: `Cache sendo aquecido para o evento: ${evento}` });
+  } catch (error) {
+    console.error('Erro ao aquecer cache:', error);
+    res.status(500).json({ error: 'Erro ao aquecer cache' });
   }
 });
 

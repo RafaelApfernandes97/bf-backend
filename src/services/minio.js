@@ -166,35 +166,148 @@ async function listarFotos(evento, coreografia, dia = null) {
 // Função para pré-carregar dados populares
 async function preCarregarDadosPopulares() {
   try {
-    console.log('Iniciando pré-carregamento de dados...');
+    console.log('🔄 Iniciando pré-carregamento de dados...');
     
     // Lista eventos
     const eventos = await listarEventos();
-    console.log(`Pré-carregados ${eventos.length} eventos`);
+    console.log(`✅ Pré-carregados ${eventos.length} eventos`);
     
-    // Para cada evento, pré-carrega algumas coreografias
-    for (const evento of eventos.slice(0, 3)) { // Primeiros 3 eventos
+    // Para cada evento, pré-carrega dados de forma otimizada
+    const preloadPromises = eventos.slice(0, 5).map(async (evento) => {
       try {
-        const coreografias = await listarCoreografias(evento);
-        console.log(`Pré-carregadas ${coreografias.length} coreografias do evento ${evento}`);
+        console.log(`🔄 Processando evento: ${evento}`);
         
-        // Pré-carrega fotos das primeiras coreografias
-        for (const coreografia of coreografias.slice(0, 2)) {
-          try {
-            const fotos = await listarFotos(evento, coreografia.nome);
-            console.log(`Pré-carregadas ${fotos.length} fotos da coreografia ${coreografia.nome}`);
-          } catch (error) {
-            console.error(`Erro ao pré-carregar fotos de ${coreografia.nome}:`, error);
+        // Verifica se é um evento multi-dia
+        const diasData = await s3.listObjectsV2({
+          Bucket: bucket,
+          Prefix: `${evento}/`,
+          Delimiter: '/',
+        }).promise();
+        
+        const dias = (diasData.CommonPrefixes || [])
+          .map(prefix => prefix.Prefix.replace(`${evento}/`, '').replace('/', ''))
+          .filter(nome => /^\d{2}-\d{2}-/.test(nome)); // formato DD-MM-dia
+        
+        if (dias.length > 0) {
+          // Evento multi-dia - pré-carrega dados dos dias
+          console.log(`📅 Evento ${evento} tem ${dias.length} dias`);
+          
+          for (const dia of dias.slice(0, 2)) { // Primeiros 2 dias
+            try {
+              const coreografias = await listarCoreografias(evento, dia);
+              console.log(`✅ Pré-carregadas ${coreografias.length} coreografias do dia ${dia}`);
+              
+              // Pré-carrega fotos das primeiras coreografias
+              for (const coreografia of coreografias.slice(0, 3)) {
+                try {
+                  const fotos = await listarFotosPorCaminho(`${evento}/${dia}/${coreografia.nome}`);
+                  console.log(`✅ Pré-carregadas ${fotos.length} fotos: ${evento}/${dia}/${coreografia.nome}`);
+                } catch (error) {
+                  console.error(`❌ Erro ao pré-carregar fotos ${coreografia.nome}:`, error.message);
+                }
+              }
+            } catch (error) {
+              console.error(`❌ Erro ao pré-carregar dia ${dia}:`, error.message);
+            }
+          }
+        } else {
+          // Evento de um dia - pré-carrega coreografias diretamente
+          const coreografias = await listarCoreografias(evento);
+          console.log(`✅ Pré-carregadas ${coreografias.length} coreografias do evento ${evento}`);
+          
+          // Pré-carrega fotos das primeiras coreografias
+          for (const coreografia of coreografias.slice(0, 3)) {
+            try {
+              const fotos = await listarFotos(evento, coreografia.nome);
+              console.log(`✅ Pré-carregadas ${fotos.length} fotos da coreografia ${coreografia.nome}`);
+            } catch (error) {
+              console.error(`❌ Erro ao pré-carregar fotos ${coreografia.nome}:`, error.message);
+            }
           }
         }
       } catch (error) {
-        console.error(`Erro ao pré-carregar coreografias de ${evento}:`, error);
+        console.error(`❌ Erro ao pré-carregar evento ${evento}:`, error.message);
       }
+    });
+    
+    await Promise.allSettled(preloadPromises);
+    console.log('🎉 Pré-carregamento concluído!');
+  } catch (error) {
+    console.error('❌ Erro no pré-carregamento:', error);
+  }
+}
+
+// Função otimizada para listar fotos por caminho completo
+async function listarFotosPorCaminho(caminho) {
+  const cacheKey = generateCacheKey('caminho', caminho, 'fotos');
+  
+  // Tenta obter do cache primeiro
+  let fotos = await getFromCache(cacheKey);
+  
+  if (!fotos) {
+    try {
+      const prefix = `${caminho}/`;
+      const data = await s3.listObjectsV2({
+        Bucket: bucket,
+        Prefix: prefix,
+      }).promise();
+
+      // Monta a URL pública (sem assinatura)
+      const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
+      fotos = (data.Contents || [])
+        .filter(obj => !obj.Key.endsWith('/'))
+        .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
+        .map(obj => {
+          const nomeArquivo = obj.Key.replace(prefix, '');
+          const urlPath = encodeURIComponent(obj.Key);
+          
+          return {
+            nome: nomeArquivo,
+            url: `${endpoint}/${bucket}/${urlPath}`,
+          };
+        });
+
+      // Salva no cache por 1 hora
+      await setCache(cacheKey, fotos, 3600);
+    } catch (error) {
+      console.error('Erro ao listar fotos por caminho:', error);
+      throw error;
+    }
+  }
+  
+  return fotos;
+}
+
+// Função para aquecer cache de um evento específico
+async function aquecerCacheEvento(evento) {
+  try {
+    console.log(`🔥 Aquecendo cache do evento: ${evento}`);
+    
+    // Verifica estrutura do evento
+    const data = await s3.listObjectsV2({
+      Bucket: bucket,
+      Prefix: `${evento}/`,
+      Delimiter: '/',
+    }).promise();
+    
+    const prefixes = (data.CommonPrefixes || [])
+      .map(prefix => prefix.Prefix.replace(`${evento}/`, '').replace('/', ''));
+    
+    const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
+    
+    if (dias.length > 0) {
+      // Evento multi-dia
+      for (const dia of dias) {
+        await listarCoreografias(evento, dia);
+      }
+    } else {
+      // Evento de um dia
+      await listarCoreografias(evento);
     }
     
-    console.log('Pré-carregamento concluído!');
+    console.log(`✅ Cache aquecido para evento: ${evento}`);
   } catch (error) {
-    console.error('Erro no pré-carregamento:', error);
+    console.error(`❌ Erro ao aquecer cache do evento ${evento}:`, error);
   }
 }
 
@@ -205,5 +318,7 @@ module.exports = {
   listarEventos,
   listarCoreografias,
   listarFotos,
-  preCarregarDadosPopulares
+  listarFotosPorCaminho,
+  preCarregarDadosPopulares,
+  aquecerCacheEvento
 };

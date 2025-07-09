@@ -55,7 +55,13 @@ async function initializeApp() {
     // Pré-carrega dados populares em background
     setTimeout(() => {
       preCarregarDadosPopulares();
-    }, 5000); // Aguarda 5 segundos para o servidor inicializar
+    }, 3000); // Aguarda 3 segundos para o servidor inicializar
+    
+    // Executa pré-carregamento periódico (a cada 2 horas)
+    setInterval(() => {
+      console.log('🔄 Executando pré-carregamento periódico...');
+      preCarregarDadosPopulares();
+    }, 2 * 60 * 60 * 1000); // 2 horas
     
   } catch (error) {
     console.error('Erro na inicialização:', error);

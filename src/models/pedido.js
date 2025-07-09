@@ -40,7 +40,36 @@ const pedidoSchema = new mongoose.Schema({
   dataAtualizacao: {
     type: Date,
     default: Date.now
-  }
+  },
+  logs: [{
+    data: {
+      type: Date,
+      default: Date.now
+    },
+    acao: {
+      type: String,
+      enum: ['criado', 'status_alterado', 'valor_alterado', 'item_adicionado', 'item_removido', 'editado'],
+      required: true
+    },
+    descricao: String,
+    valorAnterior: mongoose.Schema.Types.Mixed,
+    valorNovo: mongoose.Schema.Types.Mixed,
+    usuario: String // Nome do admin que fez a alteração
+  }],
+  itensAdicionais: [{
+    descricao: {
+      type: String,
+      required: true
+    },
+    valor: {
+      type: Number,
+      required: true
+    },
+    dataAdicao: {
+      type: Date,
+      default: Date.now
+    }
+  }]
 });
 
 // Middleware para atualizar dataAtualizacao

@@ -258,15 +258,27 @@ router.put('/pedidos/:id/status', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Status inválido' });
     }
     
-    const pedido = await Pedido.findByIdAndUpdate(
-      req.params.id,
-      { status, dataAtualizacao: new Date() },
-      { new: true }
-    ).populate('usuario', 'nome email telefone');
-    
+    const pedido = await Pedido.findById(req.params.id);
     if (!pedido) {
       return res.status(404).json({ error: 'Pedido não encontrado' });
     }
+    
+    const statusAnterior = pedido.status;
+    
+    // Adicionar log da alteração
+    pedido.logs.push({
+      acao: 'status_alterado',
+      descricao: `Status alterado de "${statusAnterior}" para "${status}"`,
+      valorAnterior: statusAnterior,
+      valorNovo: status,
+      usuario: req.user.username || 'Admin'
+    });
+    
+    pedido.status = status;
+    pedido.dataAtualizacao = new Date();
+    
+    await pedido.save();
+    await pedido.populate('usuario', 'nome email telefone');
     
     res.json(pedido);
   } catch (error) {
@@ -514,5 +526,99 @@ router.get('/relatorio/vendas', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Erro ao gerar relatório' });
   }
 });
+
+// Adicionar item adicional ao pedido
+router.post('/pedidos/:id/itens-adicionais', authMiddleware, async (req, res) => {
+  try {
+    const { descricao, valor } = req.body;
+    
+    if (!descricao || !valor || valor <= 0) {
+      return res.status(400).json({ error: 'Descrição e valor são obrigatórios' });
+    }
+    
+    const pedido = await Pedido.findById(req.params.id);
+    if (!pedido) {
+      return res.status(404).json({ error: 'Pedido não encontrado' });
+    }
+    
+    const novoItem = {
+      descricao,
+      valor: parseFloat(valor),
+      dataAdicao: new Date()
+    };
+    
+    pedido.itensAdicionais.push(novoItem);
+    
+    // Recalcular valor total
+    const valorItensAdicionais = pedido.itensAdicionais.reduce((sum, item) => sum + item.valor, 0);
+    const valorFotos = pedido.fotos.length * pedido.valorUnitario;
+    pedido.valorTotal = valorFotos + valorItensAdicionais;
+    
+    // Adicionar log
+    pedido.logs.push({
+      acao: 'item_adicionado',
+      descricao: `Item adicionado: ${descricao} - ${formatCurrency(valor)}`,
+      valorNovo: novoItem,
+      usuario: req.user.username || 'Admin'
+    });
+    
+    pedido.dataAtualizacao = new Date();
+    await pedido.save();
+    await pedido.populate('usuario', 'nome email telefone');
+    
+    res.json(pedido);
+  } catch (error) {
+    console.error('Erro ao adicionar item:', error);
+    res.status(500).json({ error: 'Erro ao adicionar item' });
+  }
+});
+
+// Remover item adicional do pedido
+router.delete('/pedidos/:id/itens-adicionais/:itemId', authMiddleware, async (req, res) => {
+  try {
+    const pedido = await Pedido.findById(req.params.id);
+    if (!pedido) {
+      return res.status(404).json({ error: 'Pedido não encontrado' });
+    }
+    
+    const itemIndex = pedido.itensAdicionais.findIndex(item => item._id.toString() === req.params.itemId);
+    if (itemIndex === -1) {
+      return res.status(404).json({ error: 'Item não encontrado' });
+    }
+    
+    const itemRemovido = pedido.itensAdicionais[itemIndex];
+    pedido.itensAdicionais.splice(itemIndex, 1);
+    
+    // Recalcular valor total
+    const valorItensAdicionais = pedido.itensAdicionais.reduce((sum, item) => sum + item.valor, 0);
+    const valorFotos = pedido.fotos.length * pedido.valorUnitario;
+    pedido.valorTotal = valorFotos + valorItensAdicionais;
+    
+    // Adicionar log
+    pedido.logs.push({
+      acao: 'item_removido',
+      descricao: `Item removido: ${itemRemovido.descricao} - ${formatCurrency(itemRemovido.valor)}`,
+      valorAnterior: itemRemovido,
+      usuario: req.user.username || 'Admin'
+    });
+    
+    pedido.dataAtualizacao = new Date();
+    await pedido.save();
+    await pedido.populate('usuario', 'nome email telefone');
+    
+    res.json(pedido);
+  } catch (error) {
+    console.error('Erro ao remover item:', error);
+    res.status(500).json({ error: 'Erro ao remover item' });
+  }
+});
+
+// Função auxiliar para formatar moeda
+function formatCurrency(value) {
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL'
+  }).format(value);
+}
 
 module.exports = router; 
