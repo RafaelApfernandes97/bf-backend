@@ -30,7 +30,7 @@ const pedidoSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pendente', 'confirmado', 'cancelado'],
+    enum: ['pendente', 'confirmado', 'cancelado', 'pago', 'entregue'],
     default: 'pendente'
   },
   dataCriacao: {

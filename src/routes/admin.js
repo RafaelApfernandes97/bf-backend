@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Evento = require('../models/evento');
 const Usuario = require('../models/usuario');
+const Pedido = require('../models/pedido');
 const { listarEventos } = require('../services/minio');
 const TabelaPreco = require('../models/tabelaPreco');
 
@@ -165,6 +166,352 @@ router.post('/calcular-preco', authMiddleware, async (req, res) => {
     res.status(404).json({ error: 'Nenhuma tabela de preço aplicável encontrada' });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao calcular preço' });
+  }
+});
+
+// ==== MÓDULO FINANCEIRO ====
+
+// Listar todos os pedidos com filtros e paginação
+router.get('/pedidos', authMiddleware, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status, evento, dataInicio, dataFim, usuario } = req.query;
+    const skip = (page - 1) * limit;
+    
+    // Construir filtros
+    const filtros = {};
+    if (status) filtros.status = status;
+    if (evento) filtros.evento = new RegExp(evento, 'i');
+    if (usuario) {
+      // Buscar usuários que contenham o nome/email
+      const usuarios = await Usuario.find({
+        $or: [
+          { nome: new RegExp(usuario, 'i') },
+          { email: new RegExp(usuario, 'i') }
+        ]
+      }).select('_id');
+      filtros.usuario = { $in: usuarios.map(u => u._id) };
+    }
+    
+    // Filtro de data
+    if (dataInicio || dataFim) {
+      filtros.dataCriacao = {};
+      if (dataInicio) filtros.dataCriacao.$gte = new Date(dataInicio);
+      if (dataFim) {
+        const dataFimFinal = new Date(dataFim);
+        dataFimFinal.setHours(23, 59, 59, 999);
+        filtros.dataCriacao.$lte = dataFimFinal;
+      }
+    }
+    
+    // Buscar pedidos com população do usuário
+    const pedidos = await Pedido.find(filtros)
+      .populate('usuario', 'nome email telefone cpfCnpj')
+      .sort({ dataCriacao: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+    
+    // Contar total para paginação
+    const total = await Pedido.countDocuments(filtros);
+    const totalPages = Math.ceil(total / limit);
+    
+    res.json({
+      pedidos,
+      paginacao: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao buscar pedidos:', error);
+    res.status(500).json({ error: 'Erro ao buscar pedidos' });
+  }
+});
+
+// Buscar detalhes de um pedido específico
+router.get('/pedidos/:id', authMiddleware, async (req, res) => {
+  try {
+    const pedido = await Pedido.findById(req.params.id)
+      .populate('usuario', 'nome email telefone cpfCnpj cep rua numero bairro cidade estado');
+    
+    if (!pedido) {
+      return res.status(404).json({ error: 'Pedido não encontrado' });
+    }
+    
+    res.json(pedido);
+  } catch (error) {
+    console.error('Erro ao buscar pedido:', error);
+    res.status(500).json({ error: 'Erro ao buscar pedido' });
+  }
+});
+
+// Atualizar status do pedido
+router.put('/pedidos/:id/status', authMiddleware, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const statusValidos = ['pendente', 'confirmado', 'cancelado', 'pago', 'entregue'];
+    
+    if (!statusValidos.includes(status)) {
+      return res.status(400).json({ error: 'Status inválido' });
+    }
+    
+    const pedido = await Pedido.findByIdAndUpdate(
+      req.params.id,
+      { status, dataAtualizacao: new Date() },
+      { new: true }
+    ).populate('usuario', 'nome email telefone');
+    
+    if (!pedido) {
+      return res.status(404).json({ error: 'Pedido não encontrado' });
+    }
+    
+    res.json(pedido);
+  } catch (error) {
+    console.error('Erro ao atualizar status:', error);
+    res.status(500).json({ error: 'Erro ao atualizar status' });
+  }
+});
+
+// Atualizar valor do pedido
+router.put('/pedidos/:id/valor', authMiddleware, async (req, res) => {
+  try {
+    const { valorUnitario } = req.body;
+    
+    if (!valorUnitario || valorUnitario <= 0) {
+      return res.status(400).json({ error: 'Valor unitário inválido' });
+    }
+    
+    const pedido = await Pedido.findById(req.params.id);
+    if (!pedido) {
+      return res.status(404).json({ error: 'Pedido não encontrado' });
+    }
+    
+    const valorTotal = pedido.fotos.length * valorUnitario;
+    
+    const pedidoAtualizado = await Pedido.findByIdAndUpdate(
+      req.params.id,
+      { 
+        valorUnitario, 
+        valorTotal,
+        dataAtualizacao: new Date()
+      },
+      { new: true }
+    ).populate('usuario', 'nome email telefone');
+    
+    res.json(pedidoAtualizado);
+  } catch (error) {
+    console.error('Erro ao atualizar valor:', error);
+    res.status(500).json({ error: 'Erro ao atualizar valor' });
+  }
+});
+
+// Adicionar item ao pedido
+router.post('/pedidos/:id/itens', authMiddleware, async (req, res) => {
+  try {
+    const { foto } = req.body; // { nome, url, coreografia }
+    
+    if (!foto || !foto.nome || !foto.url) {
+      return res.status(400).json({ error: 'Dados da foto inválidos' });
+    }
+    
+    const pedido = await Pedido.findById(req.params.id);
+    if (!pedido) {
+      return res.status(404).json({ error: 'Pedido não encontrado' });
+    }
+    
+    // Verificar se a foto já existe no pedido
+    const fotoExiste = pedido.fotos.some(f => f.nome === foto.nome && f.url === foto.url);
+    if (fotoExiste) {
+      return res.status(400).json({ error: 'Esta foto já está no pedido' });
+    }
+    
+    pedido.fotos.push(foto);
+    pedido.valorTotal = pedido.fotos.length * pedido.valorUnitario;
+    pedido.dataAtualizacao = new Date();
+    
+    await pedido.save();
+    await pedido.populate('usuario', 'nome email telefone');
+    
+    res.json(pedido);
+  } catch (error) {
+    console.error('Erro ao adicionar item:', error);
+    res.status(500).json({ error: 'Erro ao adicionar item' });
+  }
+});
+
+// Remover item do pedido
+router.delete('/pedidos/:id/itens/:itemIndex', authMiddleware, async (req, res) => {
+  try {
+    const { itemIndex } = req.params;
+    const index = parseInt(itemIndex);
+    
+    const pedido = await Pedido.findById(req.params.id);
+    if (!pedido) {
+      return res.status(404).json({ error: 'Pedido não encontrado' });
+    }
+    
+    if (index < 0 || index >= pedido.fotos.length) {
+      return res.status(400).json({ error: 'Índice do item inválido' });
+    }
+    
+    pedido.fotos.splice(index, 1);
+    pedido.valorTotal = pedido.fotos.length * pedido.valorUnitario;
+    pedido.dataAtualizacao = new Date();
+    
+    await pedido.save();
+    await pedido.populate('usuario', 'nome email telefone');
+    
+    res.json(pedido);
+  } catch (error) {
+    console.error('Erro ao remover item:', error);
+    res.status(500).json({ error: 'Erro ao remover item' });
+  }
+});
+
+// Estatísticas do dashboard financeiro
+router.get('/estatisticas', authMiddleware, async (req, res) => {
+  try {
+    const { periodo = '30' } = req.query; // últimos 30 dias por padrão
+    const diasAtras = parseInt(periodo);
+    const dataInicio = new Date();
+    dataInicio.setDate(dataInicio.getDate() - diasAtras);
+    
+    // Agregações para estatísticas
+    const stats = await Pedido.aggregate([
+      {
+        $facet: {
+          // Total de pedidos por status
+          porStatus: [
+            { $group: { _id: '$status', count: { $sum: 1 }, total: { $sum: '$valorTotal' } } }
+          ],
+          // Pedidos por período
+          porPeriodo: [
+            { $match: { dataCriacao: { $gte: dataInicio } } },
+            {
+              $group: {
+                _id: { $dateToString: { format: '%Y-%m-%d', date: '$dataCriacao' } },
+                count: { $sum: 1 },
+                total: { $sum: '$valorTotal' }
+              }
+            },
+            { $sort: { _id: 1 } }
+          ],
+          // Pedidos por evento
+          porEvento: [
+            { $match: { dataCriacao: { $gte: dataInicio } } },
+            {
+              $group: {
+                _id: '$evento',
+                count: { $sum: 1 },
+                total: { $sum: '$valorTotal' }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 10 }
+          ],
+          // Totais gerais
+          totais: [
+            {
+              $group: {
+                _id: null,
+                totalPedidos: { $sum: 1 },
+                totalReceita: { $sum: '$valorTotal' },
+                receitaPendente: {
+                  $sum: { $cond: [{ $eq: ['$status', 'pendente'] }, '$valorTotal', 0] }
+                },
+                receitaConfirmada: {
+                  $sum: { $cond: [{ $eq: ['$status', 'confirmado'] }, '$valorTotal', 0] }
+                },
+                receitaPaga: {
+                  $sum: { $cond: [{ $eq: ['$status', 'pago'] }, '$valorTotal', 0] }
+                }
+              }
+            }
+          ],
+          // Estatísticas do período
+          periodoStats: [
+            { $match: { dataCriacao: { $gte: dataInicio } } },
+            {
+              $group: {
+                _id: null,
+                pedidosPeriodo: { $sum: 1 },
+                receitaPeriodo: { $sum: '$valorTotal' },
+                ticketMedio: { $avg: '$valorTotal' }
+              }
+            }
+          ]
+        }
+      }
+    ]);
+    
+    const resultado = {
+      porStatus: stats[0].porStatus,
+      porPeriodo: stats[0].porPeriodo,
+      porEvento: stats[0].porEvento,
+      totais: stats[0].totais[0] || {
+        totalPedidos: 0,
+        totalReceita: 0,
+        receitaPendente: 0,
+        receitaConfirmada: 0,
+        receitaPaga: 0
+      },
+      periodo: {
+        dias: diasAtras,
+        ...(stats[0].periodoStats[0] || {
+          pedidosPeriodo: 0,
+          receitaPeriodo: 0,
+          ticketMedio: 0
+        })
+      }
+    };
+    
+    res.json(resultado);
+  } catch (error) {
+    console.error('Erro ao gerar estatísticas:', error);
+    res.status(500).json({ error: 'Erro ao gerar estatísticas' });
+  }
+});
+
+// Relatório de vendas (CSV)
+router.get('/relatorio/vendas', authMiddleware, async (req, res) => {
+  try {
+    const { dataInicio, dataFim, formato = 'json' } = req.query;
+    
+    const filtros = {};
+    if (dataInicio || dataFim) {
+      filtros.dataCriacao = {};
+      if (dataInicio) filtros.dataCriacao.$gte = new Date(dataInicio);
+      if (dataFim) {
+        const dataFimFinal = new Date(dataFim);
+        dataFimFinal.setHours(23, 59, 59, 999);
+        filtros.dataCriacao.$lte = dataFimFinal;
+      }
+    }
+    
+    const pedidos = await Pedido.find(filtros)
+      .populate('usuario', 'nome email telefone cpfCnpj')
+      .sort({ dataCriacao: -1 });
+    
+    if (formato === 'csv') {
+      // Gerar CSV
+      const csvHeaders = 'ID,Cliente,Email,Telefone,Evento,Quantidade,Valor Unit,Valor Total,Status,Data\n';
+      const csvData = pedidos.map(p => {
+        const data = new Date(p.dataCriacao).toLocaleDateString('pt-BR');
+        return `${p.pedidoId},"${p.usuario.nome}","${p.usuario.email}","${p.usuario.telefone}","${p.evento}",${p.fotos.length},${p.valorUnitario},${p.valorTotal},"${p.status}","${data}"`;
+      }).join('\n');
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="relatorio-vendas.csv"');
+      res.send(csvHeaders + csvData);
+    } else {
+      res.json(pedidos);
+    }
+  } catch (error) {
+    console.error('Erro ao gerar relatório:', error);
+    res.status(500).json({ error: 'Erro ao gerar relatório' });
   }
 });
 
