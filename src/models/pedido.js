@@ -78,12 +78,16 @@ pedidoSchema.pre('save', function(next) {
   next();
 });
 
-// Método para gerar ID único do pedido
-pedidoSchema.statics.gerarPedidoId = function() {
-  // Gera um ID numérico curto (ex: 7 dígitos)
-  const ts = Date.now().toString().slice(-5); // últimos 5 dígitos do timestamp
-  const rand = Math.floor(100 + Math.random() * 900); // 3 dígitos aleatórios
-  return ts + rand; // Exemplo: 1234567
+// Substituir a função gerarPedidoId para gerar IDs sequenciais a partir de 3500
+let pedidoSeq = 3500;
+pedidoSchema.statics.gerarPedidoId = async function() {
+  // Busca o maior pedidoId já existente (numérico)
+  const ultimo = await this.findOne({}).sort({ pedidoId: -1 }).select('pedidoId').lean();
+  let proximo = pedidoSeq;
+  if (ultimo && !isNaN(Number(ultimo.pedidoId))) {
+    proximo = Math.max(Number(ultimo.pedidoId) + 1, pedidoSeq);
+  }
+  return String(proximo);
 };
 
 module.exports = mongoose.model('Pedido', pedidoSchema); 
