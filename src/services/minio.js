@@ -119,13 +119,13 @@ async function listarCoreografias(evento, dia = null) {
             /\.(jpe?g|png|webp)$/i.test(obj.Key)
           );
 
-          const imagemAleatoria = fotos.length > 0
-            ? gerarUrlAssinada(fotos[Math.floor(Math.random() * fotos.length)].Key, 7200) // 2 horas
+          const imagemCapa = fotos.length > 0
+            ? gerarUrlAssinada(fotos[0].Key, 7200)
             : '/img/sem_capa.jpg';
 
           return {
             nome,
-            capa: imagemAleatoria,
+            capa: imagemCapa,
             quantidade,
           };
         })
@@ -262,13 +262,13 @@ async function preCarregarDadosPopulares() {
                     /\.(jpe?g|png|webp)$/i.test(obj.Key)
                   );
                   
-                  const imagemAleatoria = fotos.length > 0
-                    ? gerarUrlAssinada(fotos[Math.floor(Math.random() * fotos.length)].Key, 7200)
+                  const imagemCapa = fotos.length > 0
+                    ? gerarUrlAssinada(fotos[0].Key, 7200)
                     : '/img/sem_capa.jpg';
                   
                   return {
                     nome,
-                    capa: imagemAleatoria,
+                    capa: imagemCapa,
                     quantidade,
                   };
                 })
@@ -318,13 +318,13 @@ async function preCarregarDadosPopulares() {
                 /\.(jpe?g|png|webp)$/i.test(obj.Key)
               );
               
-              const imagemAleatoria = fotos.length > 0
-                ? gerarUrlAssinada(fotos[Math.floor(Math.random() * fotos.length)].Key, 7200)
+              const imagemCapa = fotos.length > 0
+                ? gerarUrlAssinada(fotos[0].Key, 7200)
                 : '/img/sem_capa.jpg';
               
               return {
                 nome,
-                capa: imagemAleatoria,
+                capa: imagemCapa,
                 quantidade,
               };
             })
