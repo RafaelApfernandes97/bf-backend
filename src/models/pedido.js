@@ -78,16 +78,20 @@ pedidoSchema.pre('save', function(next) {
   next();
 });
 
-// Substituir a função gerarPedidoId para gerar IDs sequenciais a partir de 3500
-let pedidoSeq = 3500;
+// Substituir a função gerarPedidoId para gerar IDs no formato BEF01, BEF02, ...
 pedidoSchema.statics.gerarPedidoId = async function() {
-  // Busca o maior pedidoId já existente (numérico)
-  const ultimo = await this.findOne({}).sort({ pedidoId: -1 }).select('pedidoId').lean();
-  let proximo = pedidoSeq;
-  if (ultimo && !isNaN(Number(ultimo.pedidoId))) {
-    proximo = Math.max(Number(ultimo.pedidoId) + 1, pedidoSeq);
+  // Busca o maior pedidoId já existente que comece com 'BEF' e termina com número
+  const ultimo = await this.findOne({ pedidoId: /^BEF\d+$/ }).sort({ pedidoId: -1 }).select('pedidoId').lean();
+  let proximoNumero = 1;
+  if (ultimo && typeof ultimo.pedidoId === 'string') {
+    const match = ultimo.pedidoId.match(/^BEF(\d+)$/);
+    if (match) {
+      proximoNumero = parseInt(match[1], 10) + 1;
+    }
   }
-  return String(proximo);
+  // Garante pelo menos dois dígitos
+  const numeroFormatado = proximoNumero < 10 ? '0' + proximoNumero : String(proximoNumero);
+  return `BEF${numeroFormatado}`;
 };
 
 module.exports = mongoose.model('Pedido', pedidoSchema); 
