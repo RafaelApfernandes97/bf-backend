@@ -19,7 +19,8 @@ const corsOptions = {
         'http://localhost:3000', 
         'http://127.0.0.1:3000',
         'https://site-frontend.cbltmp.easypanel.host',
-        'http://site-frontend.cbltmp.easypanel.host'
+        'http://site-frontend.cbltmp.easypanel.host',
+        'https://foto.oballetemfoco.com'
       ];
       if (!origin || allowedOrigins.indexOf(origin) !== -1) {
         callback(null, true);
