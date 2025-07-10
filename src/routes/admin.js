@@ -6,6 +6,8 @@ const Usuario = require('../models/usuario');
 const Pedido = require('../models/pedido');
 const { listarEventos } = require('../services/minio');
 const TabelaPreco = require('../models/tabelaPreco');
+const { clearAllCache } = require('../services/cache');
+const { preCarregarDadosPopulares } = require('../services/minio');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'segredo123';
@@ -620,5 +622,42 @@ function formatCurrency(value) {
     currency: 'BRL'
   }).format(value);
 }
+
+// Rota para limpar cache
+router.post('/clear-cache', authMiddleware, async (req, res) => {
+  try {
+    const success = await clearAllCache();
+    if (success) {
+      res.json({ message: 'Cache limpo com sucesso' });
+    } else {
+      res.status(500).json({ error: 'Erro ao limpar cache' });
+    }
+  } catch (error) {
+    console.error('Erro ao limpar cache:', error);
+    res.status(500).json({ error: 'Erro ao limpar cache' });
+  }
+});
+
+// Rota para forçar varredura completa no MinIO
+router.post('/force-scan', authMiddleware, async (req, res) => {
+  try {
+    console.log('🔄 Varredura manual solicitada por admin...');
+    
+    // Executa a varredura em background
+    preCarregarDadosPopulares().then(() => {
+      console.log('✅ Varredura manual concluída!');
+    }).catch((error) => {
+      console.error('❌ Erro na varredura manual:', error);
+    });
+    
+    res.json({ 
+      message: 'Varredura completa iniciada em background',
+      note: 'A varredura pode levar alguns minutos para completar'
+    });
+  } catch (error) {
+    console.error('Erro ao iniciar varredura:', error);
+    res.status(500).json({ error: 'Erro ao iniciar varredura' });
+  }
+});
 
 module.exports = router; 

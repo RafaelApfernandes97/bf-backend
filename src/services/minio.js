@@ -1,5 +1,5 @@
 const AWS = require('aws-sdk');
-const { getFromCache, setCache, generateCacheKey } = require('./cache');
+const { getFromCache, setCache, generateCacheKey, clearAllCache } = require('./cache');
 require('dotenv').config();
 
 const s3 = new AWS.S3({
@@ -197,16 +197,26 @@ async function listarFotos(evento, coreografia, dia = null) {
 // Função para pré-carregar dados populares
 async function preCarregarDadosPopulares() {
   try {
-    console.log('🔄 Iniciando pré-carregamento de dados...');
+    console.log('🔄 Iniciando varredura completa no MinIO...');
     
-    // Lista eventos
-    const eventos = await listarEventos();
-    console.log(`✅ Pré-carregados ${eventos.length} eventos`);
+    // Limpa todo o cache antes de recarregar
+    await clearAllCache();
+    console.log('🧹 Cache limpo, iniciando nova varredura...');
     
-    // Para cada evento, pré-carrega dados de forma otimizada
-    const preloadPromises = eventos.slice(0, 5).map(async (evento) => {
+    // Lista eventos diretamente do MinIO (sem cache)
+    console.log('📂 Varredura de eventos...');
+    const data = await s3.listObjectsV2({ 
+      Bucket: bucket, 
+      Delimiter: '/' 
+    }).promise();
+    
+    const eventos = (data.CommonPrefixes || []).map(prefix => prefix.Prefix.replace('/', ''));
+    console.log(`✅ Encontrados ${eventos.length} eventos:`, eventos);
+    
+    // Para cada evento, faz varredura completa
+    const preloadPromises = eventos.map(async (evento) => {
       try {
-        console.log(`🔄 Processando evento: ${evento}`);
+        console.log(`🔄 Varredura completa do evento: ${evento}`);
         
         // Verifica se é um evento multi-dia
         const diasData = await s3.listObjectsV2({
@@ -220,51 +230,127 @@ async function preCarregarDadosPopulares() {
           .filter(nome => /^\d{2}-\d{2}-/.test(nome)); // formato DD-MM-dia
         
         if (dias.length > 0) {
-          // Evento multi-dia - pré-carrega dados dos dias
-          console.log(`📅 Evento ${evento} tem ${dias.length} dias`);
+          // Evento multi-dia - varredura completa de todos os dias
+          console.log(`📅 Evento ${evento} tem ${dias.length} dias:`, dias);
           
-          for (const dia of dias.slice(0, 2)) { // Primeiros 2 dias
+          for (const dia of dias) {
             try {
-              const coreografias = await listarCoreografias(evento, dia);
-              console.log(`✅ Pré-carregadas ${coreografias.length} coreografias do dia ${dia}`);
+              console.log(`🔄 Varredura do dia: ${evento}/${dia}`);
               
-              // Pré-carrega fotos das primeiras coreografias
-              for (const coreografia of coreografias.slice(0, 3)) {
+              // Lista coreografias do dia
+              const coreografiasData = await s3.listObjectsV2({
+                Bucket: bucket,
+                Prefix: `${evento}/${dia}/`,
+                Delimiter: '/',
+              }).promise();
+              
+              const coreografias = await Promise.all(
+                (coreografiasData.CommonPrefixes || []).map(async (p) => {
+                  const nome = p.Prefix.replace(`${evento}/${dia}/`, '').replace('/', '');
+                  const pastaCoreografia = `${evento}/${dia}/${nome}/`;
+                  
+                  // Conta fotos recursivamente
+                  const quantidade = await contarFotosRecursivo(pastaCoreografia);
+                  
+                  // Lista objetos para pegar capa
+                  const objetos = await s3.listObjectsV2({
+                    Bucket: bucket,
+                    Prefix: pastaCoreografia,
+                  }).promise();
+                  
+                  const fotos = objetos.Contents.filter(obj =>
+                    /\.(jpe?g|png|webp)$/i.test(obj.Key)
+                  );
+                  
+                  const imagemAleatoria = fotos.length > 0
+                    ? gerarUrlAssinada(fotos[Math.floor(Math.random() * fotos.length)].Key, 7200)
+                    : '/img/sem_capa.jpg';
+                  
+                  return {
+                    nome,
+                    capa: imagemAleatoria,
+                    quantidade,
+                  };
+                })
+              );
+              
+              console.log(`✅ ${coreografias.length} coreografias encontradas no dia ${dia}`);
+              
+              // Pré-carrega fotos de todas as coreografias
+              for (const coreografia of coreografias) {
                 try {
                   const fotos = await listarFotosPorCaminho(`${evento}/${dia}/${coreografia.nome}`);
-                  console.log(`✅ Pré-carregadas ${fotos.length} fotos: ${evento}/${dia}/${coreografia.nome}`);
+                  console.log(`✅ ${fotos.length} fotos carregadas: ${evento}/${dia}/${coreografia.nome}`);
                 } catch (error) {
-                  console.error(`❌ Erro ao pré-carregar fotos ${coreografia.nome}:`, error.message);
+                  console.error(`❌ Erro ao carregar fotos ${coreografia.nome}:`, error.message);
                 }
               }
             } catch (error) {
-              console.error(`❌ Erro ao pré-carregar dia ${dia}:`, error.message);
+              console.error(`❌ Erro ao processar dia ${dia}:`, error.message);
             }
           }
         } else {
-          // Evento de um dia - pré-carrega coreografias diretamente
-          const coreografias = await listarCoreografias(evento);
-          console.log(`✅ Pré-carregadas ${coreografias.length} coreografias do evento ${evento}`);
+          // Evento de um dia - varredura completa
+          console.log(`🔄 Varredura de evento simples: ${evento}`);
           
-          // Pré-carrega fotos das primeiras coreografias
-          for (const coreografia of coreografias.slice(0, 3)) {
+          // Lista coreografias diretamente
+          const coreografiasData = await s3.listObjectsV2({
+            Bucket: bucket,
+            Prefix: `${evento}/`,
+            Delimiter: '/',
+          }).promise();
+          
+          const coreografias = await Promise.all(
+            (coreografiasData.CommonPrefixes || []).map(async (p) => {
+              const nome = p.Prefix.replace(`${evento}/`, '').replace('/', '');
+              const pastaCoreografia = `${evento}/${nome}/`;
+              
+              // Conta fotos recursivamente
+              const quantidade = await contarFotosRecursivo(pastaCoreografia);
+              
+              // Lista objetos para pegar capa
+              const objetos = await s3.listObjectsV2({
+                Bucket: bucket,
+                Prefix: pastaCoreografia,
+              }).promise();
+              
+              const fotos = objetos.Contents.filter(obj =>
+                /\.(jpe?g|png|webp)$/i.test(obj.Key)
+              );
+              
+              const imagemAleatoria = fotos.length > 0
+                ? gerarUrlAssinada(fotos[Math.floor(Math.random() * fotos.length)].Key, 7200)
+                : '/img/sem_capa.jpg';
+              
+              return {
+                nome,
+                capa: imagemAleatoria,
+                quantidade,
+              };
+            })
+          );
+          
+          console.log(`✅ ${coreografias.length} coreografias encontradas no evento ${evento}`);
+          
+          // Pré-carrega fotos de todas as coreografias
+          for (const coreografia of coreografias) {
             try {
               const fotos = await listarFotos(evento, coreografia.nome);
-              console.log(`✅ Pré-carregadas ${fotos.length} fotos da coreografia ${coreografia.nome}`);
+              console.log(`✅ ${fotos.length} fotos carregadas da coreografia ${coreografia.nome}`);
             } catch (error) {
-              console.error(`❌ Erro ao pré-carregar fotos ${coreografia.nome}:`, error.message);
+              console.error(`❌ Erro ao carregar fotos ${coreografia.nome}:`, error.message);
             }
           }
         }
       } catch (error) {
-        console.error(`❌ Erro ao pré-carregar evento ${evento}:`, error.message);
+        console.error(`❌ Erro ao processar evento ${evento}:`, error.message);
       }
     });
     
     await Promise.allSettled(preloadPromises);
-    console.log('🎉 Pré-carregamento concluído!');
+    console.log('🎉 Varredura completa concluída! Todos os dados foram atualizados.');
   } catch (error) {
-    console.error('❌ Erro no pré-carregamento:', error);
+    console.error('❌ Erro na varredura completa:', error);
   }
 }
 

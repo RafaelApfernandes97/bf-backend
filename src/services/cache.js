@@ -110,6 +110,28 @@ function generateCacheKey(...parts) {
   return parts.join(':').toLowerCase().replace(/[^a-z0-9:]/g, '_');
 }
 
+// Função para limpar completamente o cache
+async function clearAllCache() {
+  try {
+    console.log('🧹 Limpando todo o cache...');
+    
+    // Limpa Redis
+    if (redisClient && redisClient.isReady) {
+      await redisClient.flushAll();
+      console.log('✅ Cache Redis limpo');
+    }
+    
+    // Limpa cache em memória
+    memoryCache.flushAll();
+    console.log('✅ Cache em memória limpo');
+    
+    return true;
+  } catch (error) {
+    console.error('❌ Erro ao limpar cache:', error);
+    return false;
+  }
+}
+
 // Função para verificar se cache está disponível
 function isCacheAvailable() {
   return (redisClient && redisClient.isReady) || true; // sempre retorna true pois temos fallback
@@ -120,6 +142,7 @@ module.exports = {
   getFromCache,
   setCache,
   invalidateCache,
+  clearAllCache,
   generateCacheKey,
   isCacheAvailable,
   memoryCache

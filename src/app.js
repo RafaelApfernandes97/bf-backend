@@ -70,23 +70,34 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Inicialização do cache e pré-carregamento
+// Inicialização do cache e varredura completa
 async function initializeApp() {
   try {
     // Inicializa Redis
     const redisConnected = await initRedis();
     console.log(`Redis: ${redisConnected ? 'Conectado' : 'Usando cache em memória'}`);
     
-    // Pré-carrega dados populares em background
-    setTimeout(() => {
-      preCarregarDadosPopulares();
-    }, 3000); // Aguarda 3 segundos para o servidor inicializar
+    // Executa varredura completa na inicialização
+    console.log('🚀 Iniciando varredura completa na inicialização...');
+    setTimeout(async () => {
+      try {
+        await preCarregarDadosPopulares();
+        console.log('✅ Varredura inicial concluída com sucesso!');
+      } catch (error) {
+        console.error('❌ Erro na varredura inicial:', error);
+      }
+    }, 5000); // Aguarda 5 segundos para o servidor inicializar completamente
     
-    // Executa pré-carregamento periódico (a cada 2 horas)
-    setInterval(() => {
-      console.log('🔄 Executando pré-carregamento periódico...');
-      preCarregarDadosPopulares();
-    }, 2 * 60 * 60 * 1000); // 2 horas
+    // Executa varredura periódica (a cada 6 horas)
+    setInterval(async () => {
+      console.log('🔄 Executando varredura periódica...');
+      try {
+        await preCarregarDadosPopulares();
+        console.log('✅ Varredura periódica concluída!');
+      } catch (error) {
+        console.error('❌ Erro na varredura periódica:', error);
+      }
+    }, 6 * 60 * 60 * 1000); // 6 horas
     
   } catch (error) {
     console.error('Erro na inicialização:', error);
