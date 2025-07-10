@@ -8,7 +8,12 @@ require('dotenv').config();
 const app = express();
 
 // Middlewares
-app.use(cors());
+app.use(cors({
+  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
 // Middleware para monitoramento de performance
@@ -73,10 +78,7 @@ initializeApp();
 
 // Conexão com MongoDB usando variável de ambiente
 const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/fotos-ballet';
-mongoose.connect(mongoUri, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
+mongoose.connect(mongoUri);
 
 mongoose.connection.on('connected', () => {
   console.log('MongoDB conectado!');

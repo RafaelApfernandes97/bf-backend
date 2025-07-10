@@ -55,9 +55,14 @@ async function listarEventos() {
   return eventos;
 }
 
-// Função recursiva para contar todas as fotos em uma pasta e subpastas
+// Função recursiva para contar todas as fotos em uma pasta e subpastas, agora com cache
 async function contarFotosRecursivo(prefix) {
-  let total = 0;
+  const cacheKey = `fotos_count:${prefix}`;
+  let total = await getFromCache(cacheKey);
+  if (typeof total === 'number') {
+    return total;
+  }
+  total = 0;
   let ContinuationToken = undefined;
   do {
     const data = await s3.listObjectsV2({
@@ -65,21 +70,16 @@ async function contarFotosRecursivo(prefix) {
       Prefix: prefix,
       ContinuationToken,
     }).promise();
-
-    // Conta fotos nesta pasta
     total += (data.Contents || []).filter(obj =>
       /\.(jpe?g|png|webp)$/i.test(obj.Key)
     ).length;
-
-    // Busca subpastas
     const subpastas = (data.CommonPrefixes || []).map(p => p.Prefix);
     for (const subpasta of subpastas) {
       total += await contarFotosRecursivo(subpasta);
     }
-
     ContinuationToken = data.IsTruncated ? data.NextContinuationToken : undefined;
   } while (ContinuationToken);
-
+  await setCache(cacheKey, total, 1800); // 30 minutos
   return total;
 }
 
@@ -351,5 +351,6 @@ module.exports = {
   listarFotos,
   listarFotosPorCaminho,
   preCarregarDadosPopulares,
-  aquecerCacheEvento
+  aquecerCacheEvento,
+  contarFotosRecursivo // garantir exportação
 };

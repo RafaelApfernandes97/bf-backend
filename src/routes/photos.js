@@ -9,7 +9,8 @@ const {
   aquecerCacheEvento,
   s3,
   bucket,
-  gerarUrlAssinada
+  gerarUrlAssinada,
+  contarFotosRecursivo
 } = require('../services/minio');
 const { invalidateCache, generateCacheKey } = require('../services/cache');
 
@@ -104,25 +105,23 @@ router.post('/eventos/pasta', async (req, res) => {
     const subpastas = await Promise.all(
       (data.CommonPrefixes || []).map(async (p) => {
         const nome = p.Prefix.replace(prefix, '').replace('/', '');
-        
-        // Contar itens na subpasta para exibir quantidade
+        // Contar fotos recursivamente na subpasta
+        const quantidade = await contarFotosRecursivo(p.Prefix);
+        // Buscar capa
         const objetos = await s3.listObjectsV2({
           Bucket: bucket,
           Prefix: p.Prefix,
         }).promise();
-
         const fotos = objetos.Contents.filter(obj =>
           /\.(jpe?g|png|webp)$/i.test(obj.Key)
         );
-
         const imagemAleatoria = fotos.length > 0
           ? gerarUrlAssinada(fotos[Math.floor(Math.random() * fotos.length)].Key, 7200)
           : '/img/sem_capa.jpg';
-
         return {
           nome,
           capa: imagemAleatoria,
-          quantidade: fotos.length,
+          quantidade,
         };
       })
     );
