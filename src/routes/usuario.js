@@ -140,7 +140,7 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
     });
     
     // Gerar ID único do pedido
-    const pedidoId = Pedido.gerarPedidoId();
+    const pedidoId = await Pedido.gerarPedidoId();
     console.log('[WhatsApp] ID do pedido gerado:', pedidoId);
     
     // Calcular valor total
