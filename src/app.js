@@ -8,12 +8,32 @@ require('dotenv').config();
 const app = express();
 
 // Middlewares
-app.use(cors({
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Em desenvolvimento, aceita qualquer origem
+    if (process.env.NODE_ENV === 'development') {
+      callback(null, true);
+    } else {
+      // Em produção, aceita apenas origens específicas
+      const allowedOrigins = [
+        'http://localhost:3000', 
+        'http://127.0.0.1:3000',
+        'https://site-frontend.cbltmp.easypanel.host',
+        'http://site-frontend.cbltmp.easypanel.host'
+      ];
+      if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
-}));
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Middleware para monitoramento de performance
