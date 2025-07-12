@@ -17,11 +17,12 @@ const corsOptions = {
       const allowedOrigins = [
         'http://localhost:3000',
         'http://127.0.0.1:3000',
-        'http://localhost:3001',
+        'https://backend.rfsolutionbr.com.br',
         'http://127.0.0.1:3001',
         'https://site-frontend.cbltmp.easypanel.host',
         'http://site-frontend.cbltmp.easypanel.host',
-        'https://foto.oballetemfoco.com'
+        'https://foto.oballetemfoco.com',
+        'https://fotos.rfsolutionbr.com.br'
       ];
 
       const ok = !origin || allowedOrigins.some(o => origin.startsWith(o));
