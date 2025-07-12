@@ -177,7 +177,7 @@ CPF: ${user.cpfCnpj}
 Endereço: ${user.rua}, ${user.numero} - ${user.bairro}, ${user.cidade} - ${user.estado}, CEP: ${user.cep}
 
 Fotos:
-${fotos.map(f => `- ${f.nome}`).join('\n')}
+${fotos.map(f => `${f.nome}`).join('\n')}
 
 Imagens Selecionadas: ${fotos.length}
 Valor Unitário: R$ ${valorUnitario.toFixed(2).replace('.', ',')}

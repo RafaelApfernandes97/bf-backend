@@ -8,16 +8,32 @@ const { listarEventos } = require('../services/minio');
 const TabelaPreco = require('../models/tabelaPreco');
 const { clearAllCache } = require('../services/cache');
 const { preCarregarDadosPopulares } = require('../services/minio');
+const minioService = require('../services/minio');
+const rekognitionService = require('../services/rekognition');
+const path = require('path');
+const sharp = require('sharp');
+
+// Armazenamento em memória para progresso de indexação
+const progressoIndexacao = new Map();
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'segredo123';
 
 // Middleware para proteger rotas
 function authMiddleware(req, res, next) {
+  // console.log(`[DEBUG] AuthMiddleware - Rota: ${req.method} ${req.path}`);
   const token = req.headers['authorization']?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Token não fornecido' });
+  // console.log(`[DEBUG] AuthMiddleware - Token presente: ${!!token}`);
+  if (!token) {
+    // console.log(`[DEBUG] AuthMiddleware - Token não fornecido`);
+    return res.status(401).json({ error: 'Token não fornecido' });
+  }
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err) return res.status(401).json({ error: 'Token inválido' });
+    if (err) {
+      // console.log(`[DEBUG] AuthMiddleware - Token inválido:`, err.message);
+      return res.status(401).json({ error: 'Token inválido' });
+    }
+    // console.log(`[DEBUG] AuthMiddleware - Token válido, usuário: ${decoded.username}`);
     req.user = decoded;
     next();
   });
@@ -48,7 +64,7 @@ router.post('/login', async (req, res) => {
 });
 
 // CRUD de tabelas de preço
-router.get('/tabelas-preco', async (req, res) => {
+router.get('/tabelas-preco', authMiddleware, async (req, res) => {
   const tabelas = await TabelaPreco.find().sort({ nome: 1 });
   res.json(tabelas);
 });
@@ -71,7 +87,7 @@ router.delete('/tabelas-preco/:id', authMiddleware, async (req, res) => {
 });
 
 // Atualizar rotas de eventos para usar tabela de preço
-router.get('/eventos', async (req, res) => {
+router.get('/eventos', authMiddleware, async (req, res) => {
   const eventos = await Evento.find().populate('tabelaPrecoId');
   res.json(eventos);
 });
@@ -657,6 +673,361 @@ router.post('/force-scan', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Erro ao iniciar varredura:', error);
     res.status(500).json({ error: 'Erro ao iniciar varredura' });
+  }
+});
+
+// Rota de teste para indexação
+router.post('/test-indexacao', authMiddleware, async (req, res) => {
+  console.log('[DEBUG] ======== TESTE DE INDEXAÇÃO ========');
+  console.log('[DEBUG] Usuário autenticado:', req.user?.username);
+  res.json({ message: 'Teste de indexação funcionando!', user: req.user?.username });
+});
+
+// Consultar progresso de indexação
+router.get('/eventos/:evento/progresso-indexacao', authMiddleware, (req, res) => {
+  const { evento } = req.params;
+  const progresso = progressoIndexacao.get(evento) || {
+    ativo: false,
+    total: 0,
+    processadas: 0,
+    indexadas: 0,
+    erros: 0,
+    fotoAtual: '',
+    iniciadoEm: null,
+    finalizadoEm: null
+  };
+  res.json(progresso);
+});
+
+// Função para normalizar nome do evento para uso no Rekognition
+function normalizarNomeEvento(nomeEvento) {
+  return nomeEvento
+    .replace(/[^a-zA-Z0-9_.\-]/g, '_') // Substitui caracteres inválidos por underscore
+    .replace(/_{2,}/g, '_') // Remove underscores duplos
+    .replace(/^_|_$/g, '') // Remove underscores do início e fim
+    .substring(0, 100); // Limita a 100 caracteres (limite do AWS)
+}
+
+// Função para normalizar nome do arquivo para uso como externalImageId
+function normalizarNomeArquivo(nomeArquivo) {
+  return nomeArquivo
+    .replace(/[^a-zA-Z0-9_.\-:]/g, '_') // Substitui caracteres inválidos por underscore (inclui dois pontos)
+    .replace(/_{2,}/g, '_') // Remove underscores duplos
+    .replace(/^_|_$/g, '') // Remove underscores do início e fim
+    .substring(0, 255); // Limita a 255 caracteres (limite do AWS para externalImageId)
+}
+
+// Indexar todas as fotos de um evento na AWS Rekognition
+router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) => {
+  const { evento } = req.params;
+  const nomeColecao = normalizarNomeEvento(evento);
+  
+  // Verificar se já há uma indexação em andamento
+  const progressoAtual = progressoIndexacao.get(evento);
+  if (progressoAtual && progressoAtual.ativo) {
+    return res.status(409).json({ 
+      erro: 'Indexação já em andamento para este evento',
+      progresso: progressoAtual
+    });
+  }
+  
+  console.log(`[DEBUG] ======== INDEXAÇÃO DE FOTOS INICIADA ========`);
+  console.log(`[DEBUG] Evento original: ${evento}`);
+  console.log(`[DEBUG] Nome da coleção normalizado: ${nomeColecao}`);
+  console.log(`[DEBUG] Usuário autenticado: ${req.user?.username}`);
+  console.log(`[DEBUG] AWS_ACCESS_KEY_ID configurado: ${!!process.env.AWS_ACCESS_KEY_ID}`);
+  console.log(`[DEBUG] AWS_SECRET_ACCESS_KEY configurado: ${!!process.env.AWS_SECRET_ACCESS_KEY}`);
+  console.log(`[DEBUG] AWS_REGION configurado: ${process.env.AWS_REGION || 'us-east-1'}`);
+  
+  // Inicializar progresso
+  progressoIndexacao.set(evento, {
+    ativo: true,
+    total: 0,
+    processadas: 0,
+    indexadas: 0,
+    erros: 0,
+    fotoAtual: 'Preparando indexação...',
+    iniciadoEm: new Date(),
+    finalizadoEm: null
+  });
+  
+  // Responder imediatamente ao frontend
+  res.json({ sucesso: true, message: 'Indexação iniciada em background' });
+  
+  try {
+    // Cria/garante coleção na AWS Rekognition
+    console.log('[DEBUG] Criando/garantindo coleção na AWS Rekognition...');
+    await rekognitionService.criarColecao(nomeColecao);
+    console.log('[DEBUG] Coleção pronta. Buscando coreografias e dias do evento...');
+
+    // Busca todas as coreografias e dias do evento
+    const data = await minioService.s3.listObjectsV2({
+      Bucket: minioService.bucket,
+      Prefix: `${evento}/`,
+      Delimiter: '/',
+    }).promise();
+    const prefixes = (data.CommonPrefixes || []).map(p => p.Prefix.replace(`${evento}/`, '').replace('/', ''));
+    const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
+    let fotosParaIndexar = [];
+
+    if (dias.length > 0) {
+      console.log(`[DEBUG] Evento multi-dia (${dias.length} dias):`, dias);
+      for (const dia of dias) {
+        const coreografias = await minioService.listarCoreografias(evento, dia);
+        console.log(`[DEBUG] Dia ${dia} - coreografias:`, coreografias.map(c => c.nome));
+        for (const coreografia of coreografias) {
+          const caminho = `${evento}/${dia}/${coreografia.nome}`;
+          const fotos = await minioService.listarFotosPorCaminho(caminho);
+          console.log(`[DEBUG] Dia ${dia} - Coreografia ${coreografia.nome} - ${fotos.length} fotos`);
+          fotosParaIndexar.push(...fotos.map(f => ({ ...f, caminho })));
+        }
+      }
+    } else {
+      console.log('[DEBUG] Evento de um dia.');
+      const coreografias = await minioService.listarCoreografias(evento);
+      console.log('[DEBUG] Coreografias:', coreografias.map(c => c.nome));
+      for (const coreografia of coreografias) {
+        const caminho = `${evento}/${coreografia.nome}`;
+        const fotos = await minioService.listarFotosPorCaminho(caminho);
+        console.log(`[DEBUG] Coreografia ${coreografia.nome} - ${fotos.length} fotos`);
+        fotosParaIndexar.push(...fotos.map(f => ({ ...f, caminho })));
+      }
+    }
+
+    console.log(`[DEBUG] Total de fotos para indexar: ${fotosParaIndexar.length}`);
+    
+    // Atualizar progresso com total de fotos
+    const progresso = progressoIndexacao.get(evento);
+    progresso.total = fotosParaIndexar.length;
+    progresso.fotoAtual = 'Iniciando indexação...';
+    progressoIndexacao.set(evento, progresso);
+    
+    // Indexar cada foto na coleção Rekognition
+    let indexadas = 0;
+    for (let i = 0; i < fotosParaIndexar.length; i++) {
+      const foto = fotosParaIndexar[i];
+      try {
+        // Atualizar progresso
+        const progressoAtual = progressoIndexacao.get(evento);
+        progressoAtual.processadas = i + 1;
+        progressoAtual.fotoAtual = `Processando: ${path.basename(foto.nome)} (${i + 1}/${fotosParaIndexar.length})`;
+        progressoIndexacao.set(evento, progressoAtual);
+        
+        // Construir a chave S3 correta a partir do caminho e nome da foto
+        const s3Key = `${foto.caminho}/${foto.nome}`;
+        console.log(`[DEBUG] [${i + 1}/${fotosParaIndexar.length}] Baixando foto via S3: ${s3Key}`);
+        // Baixar imagem diretamente do MinIO usando S3 client
+        const objectData = await minioService.s3.getObject({
+          Bucket: minioService.bucket,
+          Key: s3Key
+        }).promise();
+        
+        let buffer = objectData.Body;
+        const nomeArquivoOriginal = path.basename(foto.nome);
+        const nomeArquivoNormalizado = normalizarNomeArquivo(nomeArquivoOriginal);
+        const extensaoOriginal = path.extname(nomeArquivoOriginal).toLowerCase();
+        
+        console.log(`[DEBUG] Indexando foto na coleção Rekognition:`);
+        console.log(`[DEBUG]   Nome original: ${nomeArquivoOriginal}`);
+        console.log(`[DEBUG]   Nome normalizado: ${nomeArquivoNormalizado}`);
+        console.log(`[DEBUG]   Extensão: ${extensaoOriginal}`);
+        
+        // Converter para JPEG se não for um formato nativo do Rekognition
+        const formatosNativos = ['.jpg', '.jpeg', '.png'];
+        if (!formatosNativos.includes(extensaoOriginal)) {
+          console.log(`[DEBUG] Convertendo ${extensaoOriginal.toUpperCase()} para JPEG...`);
+          buffer = await sharp(buffer)
+            .jpeg({ quality: 85 })
+            .toBuffer();
+          console.log(`[DEBUG] Conversão concluída.`);
+        } else {
+          console.log(`[DEBUG] Formato ${extensaoOriginal.toUpperCase()} já é compatível com AWS Rekognition.`);
+        }
+        
+        // Indexar na coleção Rekognition
+        await rekognitionService.indexarFace(nomeColecao, buffer, nomeArquivoNormalizado);
+        indexadas++;
+        
+        // Atualizar progresso com sucesso
+        const progressoSucesso = progressoIndexacao.get(evento);
+        progressoSucesso.indexadas = indexadas;
+        progressoIndexacao.set(evento, progressoSucesso);
+        
+        console.log(`[DEBUG] [${i + 1}/${fotosParaIndexar.length}] Foto indexada com sucesso: ${nomeArquivoNormalizado}`);
+      } catch (err) {
+        // Atualizar progresso com erro
+        const progressoErro = progressoIndexacao.get(evento);
+        progressoErro.erros++;
+        progressoIndexacao.set(evento, progressoErro);
+        
+        console.error(`[ERRO] [${i + 1}/${fotosParaIndexar.length}] Erro ao indexar foto: ${foto.nome} | Motivo: ${err.message}`);
+      }
+    }
+
+    console.log(`[DEBUG] Indexação finalizada. Total indexadas: ${indexadas} de ${fotosParaIndexar.length}`);
+    
+    // Finalizar progresso
+    const progressoFinal = progressoIndexacao.get(evento);
+    progressoFinal.ativo = false;
+    progressoFinal.finalizadoEm = new Date();
+    progressoFinal.fotoAtual = `Concluído! ${indexadas} fotos indexadas de ${fotosParaIndexar.length}`;
+    progressoIndexacao.set(evento, progressoFinal);
+    
+  } catch (error) {
+    console.error('[ERRO] Erro ao indexar fotos do evento:', error);
+    
+    // Finalizar progresso com erro
+    const progressoErro = progressoIndexacao.get(evento);
+    if (progressoErro) {
+      progressoErro.ativo = false;
+      progressoErro.finalizadoEm = new Date();
+      progressoErro.fotoAtual = `Erro durante indexação: ${error.message}`;
+      progressoIndexacao.set(evento, progressoErro);
+    }
+  }
+});
+
+// Buscar fotos por selfie usando AWS Rekognition
+router.post('/eventos/:evento/buscar-fotos-por-selfie', authMiddleware, async (req, res) => {
+  const { evento } = req.params;
+  const nomeColecao = normalizarNomeEvento(evento);
+  console.log(`[DEBUG] ======== BUSCA POR SELFIE INICIADA ========`);
+  console.log(`[DEBUG] Evento original: ${evento}`);
+  console.log(`[DEBUG] Nome da coleção normalizado: ${nomeColecao}`);
+
+  try {
+    // Verificar se há arquivo de imagem no body
+    if (!req.file && !req.body.imagemBase64) {
+      return res.status(400).json({ erro: 'Imagem não fornecida' });
+    }
+
+    let imagemBuffer;
+    if (req.file) {
+      imagemBuffer = req.file.buffer;
+    } else {
+      // Converter base64 para buffer
+      const base64Data = req.body.imagemBase64.replace(/^data:image\/[a-z]+;base64,/, '');
+      imagemBuffer = Buffer.from(base64Data, 'base64');
+    }
+
+    console.log(`[DEBUG] Tamanho da selfie: ${imagemBuffer.length} bytes`);
+    
+    // Detectar formato da selfie e converter se necessário
+    const metadata = await sharp(imagemBuffer).metadata();
+    const formatoSelfie = metadata.format;
+    console.log(`[DEBUG] Formato da selfie: ${formatoSelfie}`);
+    
+    const formatosNativos = ['jpeg', 'jpg', 'png'];
+    if (!formatosNativos.includes(formatoSelfie)) {
+      console.log(`[DEBUG] Convertendo selfie de ${formatoSelfie.toUpperCase()} para JPEG...`);
+      imagemBuffer = await sharp(imagemBuffer)
+        .jpeg({ quality: 85 })
+        .toBuffer();
+      console.log(`[DEBUG] Conversão da selfie concluída. Novo tamanho: ${imagemBuffer.length} bytes`);
+    } else {
+      console.log(`[DEBUG] Formato ${formatoSelfie.toUpperCase()} já é compatível com AWS Rekognition.`);
+    }
+
+    console.log(`[DEBUG] Buscando faces na coleção: ${nomeColecao}`);
+    // Buscar faces similares na coleção
+    const resultado = await rekognitionService.buscarFacePorImagem(nomeColecao, imagemBuffer);
+    
+    console.log(`[DEBUG] Faces encontradas: ${resultado.FaceMatches?.length || 0}`);
+    
+    if (!resultado.FaceMatches || resultado.FaceMatches.length === 0) {
+      return res.json({ fotos: [], total: 0 });
+    }
+
+    // Extrair nomes das fotos dos resultados (já normalizados)
+    const nomesFotosNormalizados = resultado.FaceMatches.map(match => match.Face.ExternalImageId);
+    console.log(`[DEBUG] Nomes das fotos encontradas (normalizados):`, nomesFotosNormalizados);
+
+    // Buscar as fotos completas no MinIO baseado nos nomes
+    const fotosEncontradas = [];
+    
+    console.log(`[DEBUG] ===== INICIANDO BUSCA DAS FOTOS =====`);
+    console.log(`[DEBUG] Procurando por ${nomesFotosNormalizados.length} fotos:`, nomesFotosNormalizados);
+    
+    // Teste da função de normalização
+    const testeNormalizacao = [
+      '3425_B (110).webp',
+      '3425_B (109).webp', 
+      '3425_B (193).webp'
+    ];
+    console.log(`[DEBUG] Teste de normalização:`);
+    testeNormalizacao.forEach(nome => {
+      const normalizado = normalizarNomeArquivo(nome);
+      console.log(`[DEBUG] '${nome}' => '${normalizado}'`);
+    });
+    
+    // Buscar em todas as coreografias do evento usando a mesma lógica do indexador
+    const data = await minioService.s3.listObjectsV2({
+      Bucket: minioService.bucket,
+      Prefix: `${evento}/`,
+      Delimiter: '/',
+    }).promise();
+    const prefixes = (data.CommonPrefixes || []).map(p => p.Prefix.replace(`${evento}/`, '').replace('/', ''));
+    const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
+
+    if (dias.length > 0) {
+      // Evento multi-dia
+      for (const dia of dias) {
+        const coreografias = await minioService.listarCoreografias(evento, dia);
+        for (const coreografia of coreografias) {
+          const fotos = await minioService.listarFotosPorCaminho(`${evento}/${dia}/${coreografia.nome}`);
+          const fotosCorrespondentes = fotos.filter(foto => {
+            const nomeArquivoNormalizado = normalizarNomeArquivo(path.basename(foto.nome));
+            // LOG para debug
+            if (nomesFotosNormalizados.includes(nomeArquivoNormalizado)) {
+              console.log(`[DEBUG] Match encontrado: ${foto.nome} => ${nomeArquivoNormalizado}`);
+            }
+            return nomesFotosNormalizados.some(nome => nomeArquivoNormalizado === nome);
+          });
+          fotosEncontradas.push(...fotosCorrespondentes);
+        }
+      }
+    } else {
+      // Evento de um dia
+      const coreografias = await minioService.listarCoreografias(evento);
+      for (const coreografia of coreografias) {
+        const fotos = await minioService.listarFotosPorCaminho(`${evento}/${coreografia.nome}`);
+        console.log(`[DEBUG] Processando coreografia: ${coreografia.nome} com ${fotos.length} fotos`);
+        
+        // Log das primeiras 10 fotos para debug
+        const primeirasFotos = fotos.slice(0, 10);
+        primeirasFotos.forEach((foto, index) => {
+          const nomeOriginal = path.basename(foto.nome);
+          const nomeNormalizado = normalizarNomeArquivo(nomeOriginal);
+          console.log(`[DEBUG] Foto ${index + 1}: original='${nomeOriginal}' normalizado='${nomeNormalizado}'`);
+        });
+        
+        const fotosCorrespondentes = fotos.filter(foto => {
+          const nomeArquivoNormalizado = normalizarNomeArquivo(path.basename(foto.nome));
+          // LOG para debug
+          if (nomesFotosNormalizados.includes(nomeArquivoNormalizado)) {
+            console.log(`[DEBUG] ✅ MATCH ENCONTRADO: ${foto.nome} => ${nomeArquivoNormalizado}`);
+          }
+          return nomesFotosNormalizados.some(nome => nomeArquivoNormalizado === nome);
+        });
+        fotosEncontradas.push(...fotosCorrespondentes);
+      }
+    }
+
+    // LOG extra para depuração
+    console.log(`[DEBUG] ===== RESULTADO FINAL =====`);
+    console.log(`[DEBUG] Total de fotos encontradas: ${fotosEncontradas.length}`);
+    if (fotosEncontradas.length === 0) {
+      console.log('[DEBUG] ❌ Nenhuma foto encontrada!');
+      console.log('[DEBUG] Nomes procurados:', nomesFotosNormalizados);
+      console.log('[DEBUG] Verifique se a função normalizarNomeArquivo está funcionando corretamente');
+    } else {
+      console.log('[DEBUG] ✅ Fotos encontradas:', fotosEncontradas.map(f => f.nome));
+    }
+    res.json({ fotos: fotosEncontradas, total: fotosEncontradas.length });
+
+  } catch (error) {
+    console.error('[ERRO] Erro ao buscar fotos por selfie:', error);
+    res.status(500).json({ erro: 'Erro ao buscar fotos por selfie', detalhes: error.message });
   }
 });
 

@@ -13,6 +13,61 @@ const {
   contarFotosRecursivo
 } = require('../services/minio');
 const { invalidateCache, generateCacheKey } = require('../services/cache');
+const rekognitionService = require('../services/rekognition');
+const minioService = require('../services/minio');
+const path = require('path');
+const axios = require('axios');
+const multer = require('multer');
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { 
+    fileSize: 10 * 1024 * 1024 // 10MB limite
+  }
+});
+
+// Função para normalizar nome do evento (mesmo padrão usado no admin.js)
+function normalizarNomeEvento(nomeEvento) {
+  return nomeEvento
+    .replace(/[^a-zA-Z0-9_.\-]/g, '_') // Substitui caracteres inválidos por underscore
+    .replace(/_{2,}/g, '_') // Remove underscores duplos
+    .replace(/^_|_$/g, '') // Remove underscores do início e fim
+    .substring(0, 100); // Limita a 100 caracteres (limite do AWS)
+}
+
+// Função para normalizar nome do arquivo (mesmo padrão usado no admin.js)
+function normalizarNomeArquivo(nomeArquivo) {
+  return nomeArquivo
+    .replace(/[^a-zA-Z0-9_.\-:]/g, '_') // Substitui caracteres inválidos por underscore (inclui dois pontos)
+    .replace(/_{2,}/g, '_') // Remove underscores duplos
+    .replace(/^_|_$/g, '') // Remove underscores do início e fim
+    .substring(0, 255); // Limita a 255 caracteres (limite do AWS para externalImageId)
+}
+
+// Middleware de autenticação JWT
+function authMiddleware(req, res, next) {
+  // Só log detalhado para a rota de busca por selfie
+  const isSelfieBusca = req.path.includes('buscar-por-selfie');
+  
+  const token = req.headers['authorization']?.split(' ')[1];
+  
+  if (!token) {
+    if (isSelfieBusca) console.log('[AuthMiddleware] ERRO: Token não fornecido');
+    return res.status(401).json({ error: 'Token não fornecido' });
+  }
+  
+  const jwt = require('jsonwebtoken');
+  const JWT_SECRET = process.env.JWT_SECRET || 'segredo123';
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+    if (err) {
+      if (isSelfieBusca) console.log('[AuthMiddleware] ERRO: Token inválido -', err.message);
+      return res.status(401).json({ error: 'Token inválido' });
+    }
+    
+    if (isSelfieBusca) console.log('[AuthMiddleware] ✅ Token válido, usuário:', decoded.nome);
+    req.user = decoded;
+    next();
+  });
+}
 
 // Listar eventos (pastas raiz no bucket)
 router.get('/eventos', async (req, res) => {
@@ -127,7 +182,11 @@ router.post('/eventos/pasta', async (req, res) => {
     );
 
     // Processar fotos diretamente na pasta atual
-    const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
+    const endpoint = (process.env.MINIO_ENDPOINT || '').replace(/\/$/, '');
+    if (!endpoint) {
+      console.error('[FATAL] Variável de ambiente MINIO_ENDPOINT não definida!');
+    }
+
     const fotos = (data.Contents || [])
       .filter(obj => !obj.Key.endsWith('/'))
       .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
@@ -138,7 +197,7 @@ router.post('/eventos/pasta', async (req, res) => {
 
     res.json({ subpastas, fotos });
   } catch (error) {
-    console.error('Erro ao navegar pasta:', error);
+    console.error('Erro detalhado ao navegar pasta:', error); // Log mais detalhado
     res.status(500).json({ error: 'Erro ao navegar pasta' });
   }
 });
@@ -167,7 +226,7 @@ router.post('/eventos/:evento/aquecer-cache', async (req, res) => {
     
     res.json({ message: `Cache sendo aquecido para o evento: ${evento}` });
   } catch (error) {
-    console.error('Erro ao aquecer cache:', error);
+    console.error(`Erro detalhado ao aquecer cache para o evento ${req.params.evento}:`, error); // Log mais detalhado
     res.status(500).json({ error: 'Erro ao aquecer cache' });
   }
 });
@@ -204,6 +263,219 @@ router.get('/cache/stats', async (req, res) => {
   } catch (error) {
     console.error('Erro ao obter estatísticas:', error);
     res.status(500).json({ error: 'Erro ao obter estatísticas' });
+  }
+});
+
+// Buscar fotos por selfie (reconhecimento facial)
+router.post('/fotos/buscar-por-selfie', (req, res, next) => {
+  console.log('[Buscar Selfie] Middleware inicial - Headers:', req.headers);
+  console.log('[Buscar Selfie] Middleware inicial - Content-Type:', req.get('Content-Type'));
+  next();
+}, authMiddleware, upload.single('selfie'), async (req, res) => {
+  try {
+    console.log('[Buscar Selfie] ===== INÍCIO =====');
+    console.log('[Buscar Selfie] Body:', req.body);
+    console.log('[Buscar Selfie] Query:', req.query);
+    console.log('[Buscar Selfie] File:', req.file ? { name: req.file.originalname, size: req.file.size } : 'AUSENTE');
+    console.log('[Buscar Selfie] User:', req.user ? { nome: req.user.nome } : 'AUSENTE');
+    
+    // Evento pode vir da query string ou do body
+    const evento = req.query.evento || req.body.evento;
+    
+    if (!req.file) {
+      console.log('[Buscar Selfie] ERRO: Arquivo não enviado');
+      return res.status(400).json({ error: 'Selfie é obrigatória.' });
+    }
+    
+    if (!evento || evento === 'undefined' || evento === 'null') {
+      console.log('[Buscar Selfie] ERRO: Evento não enviado ou inválido:', evento);
+      return res.status(400).json({ error: 'Evento é obrigatório e deve ser válido.' });
+    }
+
+    console.log('[Buscar Selfie] Dados válidos - Evento:', evento);
+    console.log('[Buscar Selfie] Usuário:', req.user?.nome);
+    console.log('[Buscar Selfie] Arquivo:', req.file.originalname, '(', req.file.size, 'bytes)');
+    
+    // Nome da coleção do Rekognition para o evento (usando a mesma normalização do admin.js)
+    const nomeColecao = normalizarNomeEvento(evento);
+    console.log('[Buscar Selfie] Coleção:', nomeColecao);
+    
+    try {
+      // Buscar faces similares usando AWS Rekognition
+      console.log('[Buscar Selfie] Iniciando busca no Rekognition...');
+      console.log('[Buscar Selfie] Parâmetros:', {
+        nomeColecao,
+        tamanhoBuffer: req.file.buffer.length,
+        maxFaces: 10,
+        threshold: 70
+      });
+      
+      const resultado = await rekognitionService.buscarFacePorImagem(
+        nomeColecao,
+        req.file.buffer,
+        10, // máximo 10 faces
+        70  // threshold de 70%
+      );
+
+      console.log('[Buscar Selfie] Resultado do Rekognition:', {
+        faceMatches: resultado.FaceMatches ? resultado.FaceMatches.length : 0,
+        searchedFaceBoundingBox: resultado.SearchedFaceBoundingBox ? 'presente' : 'ausente',
+        searchedFaceConfidence: resultado.SearchedFaceConfidence
+      });
+      
+      if (resultado.FaceMatches && resultado.FaceMatches.length > 0) {
+        console.log('[Buscar Selfie] Primeiras faces encontradas:');
+        resultado.FaceMatches.slice(0, 3).forEach((match, index) => {
+          console.log(`   ${index + 1}. ExternalImageId: ${match.Face.ExternalImageId}`);
+          console.log(`      Similaridade: ${match.Similarity.toFixed(2)}%`);
+        });
+      }
+      
+      if (!resultado.FaceMatches || resultado.FaceMatches.length === 0) {
+        console.log('[Buscar Selfie] Nenhuma face similar encontrada');
+        return res.json({ fotos: [] });
+      }
+
+      // Buscar as fotos correspondentes pelo ExternalImageId
+      let fotosEncontradas = [];
+      
+      console.log('[Buscar Selfie] Iniciando busca das fotos correspondentes...');
+      
+      // Limpar cache das fotos para garantir URLs atualizadas
+      const { clearAllCache } = require('../services/cache');
+      await clearAllCache();
+      console.log('[Buscar Selfie] Cache limpo para garantir URLs atualizadas');
+      
+      // Teste da função de normalização
+      console.log('[Buscar Selfie] Teste de normalização:');
+      const exemplosTeste = ['3425_B (110).webp', '3425_B (109).webp', '3425_B (193).webp'];
+      exemplosTeste.forEach(nome => {
+        const normalizado = normalizarNomeArquivo(nome);
+        console.log(`[Buscar Selfie] '${nome}' => '${normalizado}'`);
+      });
+      
+      // Buscar todas as coreografias e dias do evento
+      const data = await s3.listObjectsV2({
+        Bucket: bucket,
+        Prefix: `${evento}/`,
+        Delimiter: '/',
+      }).promise();
+      
+      const prefixes = (data.CommonPrefixes || []).map(p => p.Prefix.replace(`${evento}/`, '').replace('/', ''));
+      const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
+      
+      console.log('[Buscar Selfie] Estrutura do evento:', {
+        evento,
+        prefixes: prefixes.slice(0, 5), // primeiros 5
+        totalPrefixes: prefixes.length,
+        dias: dias.slice(0, 5), // primeiros 5
+        totalDias: dias.length,
+        isMultiDia: dias.length > 0
+      });
+      
+              if (dias.length > 0) {
+          // Evento multi-dia
+          console.log('[Buscar Selfie] Processando evento multi-dia...');
+          for (const dia of dias) {
+            const coreografias = await listarCoreografias(evento, dia);
+            console.log(`[Buscar Selfie] Dia ${dia}: ${coreografias.length} coreografias`);
+            
+            for (const coreografia of coreografias) {
+              const caminho = `${evento}/${dia}/${coreografia.nome}`;
+              const fotos = await listarFotosPorCaminho(caminho);
+              
+              console.log(`[Buscar Selfie] Caminho: ${caminho}, Fotos: ${fotos.length}`);
+              
+                          // Filtrar fotos que correspondem às faces encontradas
+            const fotosCorrespondentes = fotos.filter(foto => {
+              const nomeArquivo = path.basename(foto.nome);
+              const nomeArquivoNormalizado = normalizarNomeArquivo(nomeArquivo);
+              const match = resultado.FaceMatches.some(match => 
+                match.Face.ExternalImageId === nomeArquivoNormalizado
+              );
+              
+              if (match) {
+                console.log(`[Buscar Selfie] ✅ MATCH ENCONTRADO: ${nomeArquivo} (normalizado: ${nomeArquivoNormalizado})`);
+              }
+              
+              return match;
+            });
+              
+              fotosEncontradas.push(...fotosCorrespondentes);
+            }
+          }
+        } else {
+          // Evento single-dia
+          console.log('[Buscar Selfie] Processando evento single-dia...');
+          const coreografias = await listarCoreografias(evento);
+          console.log(`[Buscar Selfie] Evento single-dia: ${coreografias.length} coreografias`);
+          
+          for (const coreografia of coreografias) {
+            const caminho = `${evento}/${coreografia.nome}`;
+            const fotos = await listarFotosPorCaminho(caminho);
+            
+            console.log(`[Buscar Selfie] Caminho: ${caminho}, Fotos: ${fotos.length}`);
+            
+            // Log alguns exemplos de ExternalImageId vs nomes de arquivos
+            if (fotos.length > 0) {
+              const exemplosFotos = fotos.slice(0, 3).map(f => path.basename(f.nome));
+              const exemplosExternalIds = resultado.FaceMatches.slice(0, 3).map(m => m.Face.ExternalImageId);
+              
+              console.log(`[Buscar Selfie] Exemplos de fotos: ${exemplosFotos.join(', ')}`);
+              console.log(`[Buscar Selfie] Exemplos de ExternalImageId: ${exemplosExternalIds.join(', ')}`);
+            }
+            
+            // Filtrar fotos que correspondem às faces encontradas
+            const fotosCorrespondentes = fotos.filter(foto => {
+              const nomeArquivo = path.basename(foto.nome);
+              const nomeArquivoNormalizado = normalizarNomeArquivo(nomeArquivo);
+              const match = resultado.FaceMatches.some(match => 
+                match.Face.ExternalImageId === nomeArquivoNormalizado
+              );
+              
+              if (match) {
+                console.log(`[Buscar Selfie] ✅ MATCH ENCONTRADO: ${nomeArquivo} (normalizado: ${nomeArquivoNormalizado})`);
+              }
+              
+              return match;
+            });
+            
+            fotosEncontradas.push(...fotosCorrespondentes);
+          }
+        }
+
+      console.log('[Buscar Selfie] ===== RESUMO FINAL =====');
+      console.log(`[Buscar Selfie] Total de fotos encontradas: ${fotosEncontradas.length}`);
+      console.log(`[Buscar Selfie] Faces matches do Rekognition: ${resultado.FaceMatches.length}`);
+      
+      if (fotosEncontradas.length > 0) {
+        console.log('[Buscar Selfie] Primeiras fotos encontradas:');
+        fotosEncontradas.slice(0, 3).forEach((foto, index) => {
+          console.log(`   ${index + 1}. Nome: ${foto.nome}`);
+          console.log(`      URL: ${foto.url}`);
+          console.log(`      URL válida: ${foto.url.includes('(') ? 'PROBLEMA - Contém parênteses' : 'OK'}`);
+        });
+      }
+      
+      res.json({ fotos: fotosEncontradas });
+      
+    } catch (rekError) {
+      console.error('[Buscar Selfie] Erro no Rekognition:', rekError);
+      
+      if (rekError.code === 'ResourceNotFoundException') {
+        return res.status(404).json({ 
+          error: `Coleção de fotos não encontrada para o evento "${evento}". Verifique se as fotos foram indexadas pelo administrador.` 
+        });
+      }
+      
+      return res.status(500).json({ 
+        error: 'Erro no serviço de reconhecimento facial. Tente novamente mais tarde.' 
+      });
+    }
+    
+  } catch (error) {
+    console.error('[Buscar Selfie] Erro geral:', error);
+    res.status(500).json({ error: 'Erro ao buscar fotos. Tente novamente.' });
   }
 });
 

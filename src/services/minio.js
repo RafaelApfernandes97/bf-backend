@@ -28,31 +28,18 @@ function gerarUrlAssinada(key, expiresIn = 3600) {
   return s3.getSignedUrl('getObject', params);
 }
 
-// Lista eventos com cache
+// Lista eventos SEM cache (sempre busca o estado atual do bucket)
 async function listarEventos() {
-  const cacheKey = generateCacheKey('eventos', 'lista');
-  
-  // Tenta obter do cache primeiro
-  let eventos = await getFromCache(cacheKey);
-  
-  if (!eventos) {
-    try {
-      const data = await s3.listObjectsV2({ 
-        Bucket: bucket, 
-        Delimiter: '/' 
-      }).promise();
-      
-      eventos = (data.CommonPrefixes || []).map(prefix => prefix.Prefix.replace('/', ''));
-      
-      // Salva no cache por 1 hora
-      await setCache(cacheKey, eventos, 3600);
-    } catch (error) {
-      console.error('Erro ao listar eventos:', error);
-      throw error;
-    }
+  try {
+    const data = await s3.listObjectsV2({ 
+      Bucket: bucket, 
+      Delimiter: '/' 
+    }).promise();
+    return (data.CommonPrefixes || []).map(prefix => prefix.Prefix.replace('/', ''));
+  } catch (error) {
+    console.error('Erro ao listar eventos:', error);
+    throw error;
   }
-  
-  return eventos;
 }
 
 // Função recursiva para contar todas as fotos em uma pasta e subpastas, agora com cache
@@ -150,21 +137,21 @@ async function listarFotos(evento, coreografia, dia = null) {
   
   // Tenta obter do cache primeiro
   let fotos = await getFromCache(cacheKey);
-  console.log('[MinIO] listarFotos - Cache key:', cacheKey);
-  console.log('[MinIO] listarFotos - Fotos do cache:', fotos ? fotos.length : 'null');
+  // console.log('[MinIO] listarFotos - Cache key:', cacheKey);
+  // console.log('[MinIO] listarFotos - Fotos do cache:', fotos ? fotos.length : 'null');
   
   if (!fotos) {
     try {
       const prefix = dia ? `${evento}/${dia}/${coreografia}/` : `${evento}/${coreografia}/`;
-      console.log('[MinIO] listarFotos - Prefix:', prefix);
-      console.log('[MinIO] listarFotos - Bucket:', bucket);
+      // console.log('[MinIO] listarFotos - Prefix:', prefix);
+      // console.log('[MinIO] listarFotos - Bucket:', bucket);
       
       const data = await s3.listObjectsV2({
         Bucket: bucket,
         Prefix: prefix,
       }).promise();
       
-      console.log('[MinIO] listarFotos - Objetos encontrados:', data.Contents?.length || 0);
+      // console.log('[MinIO] listarFotos - Objetos encontrados:', data.Contents?.length || 0);
 
       // Monta a URL pública (sem assinatura)
       const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
@@ -173,9 +160,9 @@ async function listarFotos(evento, coreografia, dia = null) {
         .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
         .map(obj => {
           const nomeArquivo = obj.Key.replace(prefix, '');
-          const urlPath = dia ? 
-            `${encodeURIComponent(evento)}/${encodeURIComponent(dia)}/${encodeURIComponent(coreografia)}/${encodeURIComponent(nomeArquivo)}` :
-            `${encodeURIComponent(evento)}/${encodeURIComponent(coreografia)}/${encodeURIComponent(nomeArquivo)}`;
+          // Codifica cada parte do caminho separadamente para evitar problemas
+          const partesPath = obj.Key.split('/');
+          const urlPath = partesPath.map(parte => encodeURIComponent(parte)).join('/');
           
           return {
             nome: nomeArquivo,
@@ -197,26 +184,26 @@ async function listarFotos(evento, coreografia, dia = null) {
 // Função para pré-carregar dados populares
 async function preCarregarDadosPopulares() {
   try {
-    console.log('🔄 Iniciando varredura completa no MinIO...');
+    // console.log('🔄 Iniciando varredura completa no MinIO...');
     
     // Limpa todo o cache antes de recarregar
     await clearAllCache();
-    console.log('🧹 Cache limpo, iniciando nova varredura...');
+    // console.log('🧹 Cache limpo, iniciando nova varredura...');
     
     // Lista eventos diretamente do MinIO (sem cache)
-    console.log('📂 Varredura de eventos...');
+    // console.log('📂 Varredura de eventos...');
     const data = await s3.listObjectsV2({ 
       Bucket: bucket, 
       Delimiter: '/' 
     }).promise();
     
     const eventos = (data.CommonPrefixes || []).map(prefix => prefix.Prefix.replace('/', ''));
-    console.log(`✅ Encontrados ${eventos.length} eventos:`, eventos);
+    // console.log(`✅ Encontrados ${eventos.length} eventos:`, eventos);
     
     // Para cada evento, faz varredura completa
     const preloadPromises = eventos.map(async (evento) => {
       try {
-        console.log(`🔄 Varredura completa do evento: ${evento}`);
+        // console.log(`🔄 Varredura completa do evento: ${evento}`);
         
         // Verifica se é um evento multi-dia
         const diasData = await s3.listObjectsV2({
@@ -231,11 +218,11 @@ async function preCarregarDadosPopulares() {
         
         if (dias.length > 0) {
           // Evento multi-dia - varredura completa de todos os dias
-          console.log(`📅 Evento ${evento} tem ${dias.length} dias:`, dias);
+          // console.log(`📅 Evento ${evento} tem ${dias.length} dias:`, dias);
           
           for (const dia of dias) {
             try {
-              console.log(`🔄 Varredura do dia: ${evento}/${dia}`);
+              // console.log(`🔄 Varredura do dia: ${evento}/${dia}`);
               
               // Lista coreografias do dia
               const coreografiasData = await s3.listObjectsV2({
@@ -274,24 +261,24 @@ async function preCarregarDadosPopulares() {
                 })
               );
               
-              console.log(`✅ ${coreografias.length} coreografias encontradas no dia ${dia}`);
+              // console.log(`✅ ${coreografias.length} coreografias encontradas no dia ${dia}`);
               
               // Pré-carrega fotos de todas as coreografias
               for (const coreografia of coreografias) {
                 try {
                   const fotos = await listarFotosPorCaminho(`${evento}/${dia}/${coreografia.nome}`);
-                  console.log(`✅ ${fotos.length} fotos carregadas: ${evento}/${dia}/${coreografia.nome}`);
+                  // console.log(`✅ ${fotos.length} fotos carregadas: ${evento}/${dia}/${coreografia.nome}`);
                 } catch (error) {
-                  console.error(`❌ Erro ao carregar fotos ${coreografia.nome}:`, error.message);
+                  // console.error(`❌ Erro ao carregar fotos ${coreografia.nome}:`, error.message);
                 }
               }
             } catch (error) {
-              console.error(`❌ Erro ao processar dia ${dia}:`, error.message);
+              // console.error(`❌ Erro ao processar dia ${dia}:`, error.message);
             }
           }
         } else {
           // Evento de um dia - varredura completa
-          console.log(`🔄 Varredura de evento simples: ${evento}`);
+          // console.log(`🔄 Varredura de evento simples: ${evento}`);
           
           // Lista coreografias diretamente
           const coreografiasData = await s3.listObjectsV2({
@@ -330,27 +317,27 @@ async function preCarregarDadosPopulares() {
             })
           );
           
-          console.log(`✅ ${coreografias.length} coreografias encontradas no evento ${evento}`);
+          // console.log(`✅ ${coreografias.length} coreografias encontradas no evento ${evento}`);
           
           // Pré-carrega fotos de todas as coreografias
           for (const coreografia of coreografias) {
             try {
               const fotos = await listarFotos(evento, coreografia.nome);
-              console.log(`✅ ${fotos.length} fotos carregadas da coreografia ${coreografia.nome}`);
+              // console.log(`✅ ${fotos.length} fotos carregadas da coreografia ${coreografia.nome}`);
             } catch (error) {
-              console.error(`❌ Erro ao carregar fotos ${coreografia.nome}:`, error.message);
+              // console.error(`❌ Erro ao carregar fotos ${coreografia.nome}:`, error.message);
             }
           }
         }
       } catch (error) {
-        console.error(`❌ Erro ao processar evento ${evento}:`, error.message);
+        // console.error(`❌ Erro ao processar evento ${evento}:`, error.message);
       }
     });
     
     await Promise.allSettled(preloadPromises);
-    console.log('🎉 Varredura completa concluída! Todos os dados foram atualizados.');
+    // console.log('🎉 Varredura completa concluída! Todos os dados foram atualizados.');
   } catch (error) {
-    console.error('❌ Erro na varredura completa:', error);
+    // console.error('❌ Erro na varredura completa:', error);
   }
 }
 
@@ -369,18 +356,18 @@ async function listarFotosPorCaminho(caminho) {
         Prefix: prefix,
       }).promise();
 
-      // Monta a URL pública (sem assinatura)
-      const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
+      // Monta URLs assinadas para garantir acesso correto
       fotos = (data.Contents || [])
         .filter(obj => !obj.Key.endsWith('/'))
         .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
         .map(obj => {
           const nomeArquivo = obj.Key.replace(prefix, '');
-          const urlPath = encodeURIComponent(obj.Key);
+          // Usar URL assinada para garantir acesso correto
+          const urlAssinada = gerarUrlAssinada(obj.Key, 7200); // 2 horas
           
           return {
             nome: nomeArquivo,
-            url: `${endpoint}/${bucket}/${urlPath}`,
+            url: urlAssinada,
           };
         });
 

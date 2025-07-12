@@ -8,12 +8,17 @@
     "test": "node test-performance.js",
     "test-redis": "node test-redis.js"
   },
-  "keywords": ["backend", "api", "fotos", "ballet"],
+  "keywords": [
+    "backend",
+    "api",
+    "fotos",
+    "ballet"
+  ],
   "author": "",
   "license": "ISC",
   "description": "Backend para sistema de fotos de ballet",
   "dependencies": {
-    "aws-sdk": "^2.1692.0",
+    "aws-sdk": "^2.1564.0",
     "axios": "^1.6.0",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
@@ -22,10 +27,12 @@
     "google-auth-library": "^9.0.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.16.1",
+    "multer": "^2.0.1",
     "node-cache": "^5.1.2",
-    "redis": "^4.6.13"
+    "redis": "^4.6.13",
+    "sharp": "^0.34.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
   }
-} 
+}
