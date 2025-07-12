@@ -13,6 +13,9 @@ const rekognitionService = require('../services/rekognition');
 const path = require('path');
 const sharp = require('sharp');
 
+// Import bucket prefix from environment
+const bucketPrefix = process.env.S3_BUCKET_PREFIX || 'balletemfoco';
+
 // Armazenamento em memória para progresso de indexação
 const progressoIndexacao = new Map();
 
@@ -763,10 +766,10 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
     // Busca todas as coreografias e dias do evento
     const data = await minioService.s3.listObjectsV2({
       Bucket: minioService.bucket,
-      Prefix: `${evento}/`,
+      Prefix: `${bucketPrefix}/${evento}/`,
       Delimiter: '/',
     }).promise();
-    const prefixes = (data.CommonPrefixes || []).map(p => p.Prefix.replace(`${evento}/`, '').replace('/', ''));
+    const prefixes = (data.CommonPrefixes || []).map(p => p.Prefix.replace(`${bucketPrefix}/${evento}/`, '').replace('/', ''));
     const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
     let fotosParaIndexar = [];
 
@@ -814,9 +817,9 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
         progressoIndexacao.set(evento, progressoAtual);
         
         // Construir a chave S3 correta a partir do caminho e nome da foto
-        const s3Key = `${foto.caminho}/${foto.nome}`;
+        const s3Key = `${bucketPrefix}/${foto.caminho}/${foto.nome}`;
         console.log(`[DEBUG] [${i + 1}/${fotosParaIndexar.length}] Baixando foto via S3: ${s3Key}`);
-        // Baixar imagem diretamente do MinIO usando S3 client
+        // Baixar imagem diretamente do S3 usando S3 client
         const objectData = await minioService.s3.getObject({
           Bucket: minioService.bucket,
           Key: s3Key
@@ -963,10 +966,10 @@ router.post('/eventos/:evento/buscar-fotos-por-selfie', authMiddleware, async (r
     // Buscar em todas as coreografias do evento usando a mesma lógica do indexador
     const data = await minioService.s3.listObjectsV2({
       Bucket: minioService.bucket,
-      Prefix: `${evento}/`,
+      Prefix: `${bucketPrefix}/${evento}/`,
       Delimiter: '/',
     }).promise();
-    const prefixes = (data.CommonPrefixes || []).map(p => p.Prefix.replace(`${evento}/`, '').replace('/', ''));
+    const prefixes = (data.CommonPrefixes || []).map(p => p.Prefix.replace(`${bucketPrefix}/${evento}/`, '').replace('/', ''));
     const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
 
     if (dias.length > 0) {

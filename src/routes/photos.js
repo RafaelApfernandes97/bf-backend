@@ -12,6 +12,9 @@ const {
   gerarUrlAssinada,
   contarFotosRecursivo
 } = require('../services/minio');
+
+// Import bucket prefix from environment
+const bucketPrefix = process.env.S3_BUCKET_PREFIX || 'balletemfoco';
 const { invalidateCache, generateCacheKey } = require('../services/cache');
 const rekognitionService = require('../services/rekognition');
 const minioService = require('../services/minio');
@@ -150,18 +153,20 @@ router.post('/eventos/pasta', async (req, res) => {
     
     // Buscar subpastas e fotos no caminho
     const prefix = `${caminho}/`;
+    const fullPrefix = `${bucketPrefix}/${prefix}`;
     const data = await s3.listObjectsV2({
       Bucket: bucket,
-      Prefix: prefix,
+      Prefix: fullPrefix,
       Delimiter: '/',
     }).promise();
 
     // Processar subpastas
     const subpastas = await Promise.all(
       (data.CommonPrefixes || []).map(async (p) => {
-        const nome = p.Prefix.replace(prefix, '').replace('/', '');
-        // Contar fotos recursivamente na subpasta
-        const quantidade = await contarFotosRecursivo(p.Prefix);
+        const nome = p.Prefix.replace(fullPrefix, '').replace('/', '');
+        // Contar fotos recursivamente na subpasta (remove bucket prefix for internal function)
+        const relativePath = p.Prefix.replace(`${bucketPrefix}/`, '');
+        const quantidade = await contarFotosRecursivo(relativePath);
         // Buscar capa
         const objetos = await s3.listObjectsV2({
           Bucket: bucket,
@@ -182,17 +187,15 @@ router.post('/eventos/pasta', async (req, res) => {
     );
 
     // Processar fotos diretamente na pasta atual
-    const endpoint = (process.env.MINIO_ENDPOINT || '').replace(/\/$/, '');
-    if (!endpoint) {
-      console.error('[FATAL] Variável de ambiente MINIO_ENDPOINT não definida!');
-    }
+    const region = process.env.AWS_REGION || 'us-east-1';
+    const endpoint = `https://${bucket}.s3.${region}.amazonaws.com`;
 
     const fotos = (data.Contents || [])
       .filter(obj => !obj.Key.endsWith('/'))
       .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
       .map(obj => ({
-        nome: obj.Key.replace(prefix, ''),
-        url: `${endpoint}/${bucket}/${encodeURIComponent(obj.Key)}`,
+        nome: obj.Key.replace(fullPrefix, ''),
+        url: `${endpoint}/${encodeURIComponent(obj.Key)}`,
       }));
 
     res.json({ subpastas, fotos });
@@ -333,7 +336,7 @@ router.post('/fotos/buscar-por-selfie', (req, res, next) => {
       
       if (!resultado.FaceMatches || resultado.FaceMatches.length === 0) {
         console.log('[Buscar Selfie] Nenhuma face similar encontrada');
-        return res.json({ fotos: [] });
+        return res.json({ fotos: [], message: 'Nenhuma foto foi encontrada com a face da selfie enviada.' });
       }
 
       // Buscar as fotos correspondentes pelo ExternalImageId
@@ -357,11 +360,11 @@ router.post('/fotos/buscar-por-selfie', (req, res, next) => {
       // Buscar todas as coreografias e dias do evento
       const data = await s3.listObjectsV2({
         Bucket: bucket,
-        Prefix: `${evento}/`,
+        Prefix: `${bucketPrefix}/${evento}/`,
         Delimiter: '/',
       }).promise();
       
-      const prefixes = (data.CommonPrefixes || []).map(p => p.Prefix.replace(`${evento}/`, '').replace('/', ''));
+      const prefixes = (data.CommonPrefixes || []).map(p => p.Prefix.replace(`${bucketPrefix}/${evento}/`, '').replace('/', ''));
       const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
       
       console.log('[Buscar Selfie] Estrutura do evento:', {
@@ -455,19 +458,26 @@ router.post('/fotos/buscar-por-selfie', (req, res, next) => {
           console.log(`      URL: ${foto.url}`);
           console.log(`      URL válida: ${foto.url.includes('(') ? 'PROBLEMA - Contém parênteses' : 'OK'}`);
         });
+        res.json({ fotos: fotosEncontradas });
+      } else {
+        console.log('[Buscar Selfie] Nenhuma foto correspondente encontrada nas pastas');
+        res.json({ fotos: [], message: 'Faces similares foram detectadas, mas nenhuma foto correspondente foi encontrada nas pastas do evento.' });
       }
-      
-      res.json({ fotos: fotosEncontradas });
       
     } catch (rekError) {
       console.error('[Buscar Selfie] Erro no Rekognition:', rekError);
       
       if (rekError.code === 'ResourceNotFoundException') {
-        return res.status(404).json({ 
-          error: `Coleção de fotos não encontrada para o evento "${evento}". Verifique se as fotos foram indexadas pelo administrador.` 
-        });
+        console.log('[Buscar Selfie] Coleção não encontrada - retornando array vazio');
+        return res.json({ fotos: [], message: 'Nenhuma foto foi encontrada para este evento.' });
       }
       
+      if (rekError.code === 'InvalidParameterException') {
+        console.log('[Buscar Selfie] Face não detectada na selfie - retornando array vazio');
+        return res.json({ fotos: [], message: 'Nenhuma face foi detectada na selfie enviada.' });
+      }
+      
+      console.error('[Buscar Selfie] Erro crítico no Rekognition:', rekError.code, rekError.message);
       return res.status(500).json({ 
         error: 'Erro no serviço de reconhecimento facial. Tente novamente mais tarde.' 
       });

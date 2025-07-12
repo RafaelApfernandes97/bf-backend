@@ -3,12 +3,10 @@ const { getFromCache, setCache, generateCacheKey, clearAllCache } = require('./c
 require('dotenv').config();
 
 const s3 = new AWS.S3({
-  endpoint: process.env.MINIO_ENDPOINT,
-  accessKeyId: process.env.MINIO_ACCESS_KEY,
-  secretAccessKey: process.env.MINIO_SECRET_KEY,
-  s3ForcePathStyle: true,
+  region: process.env.AWS_REGION || 'us-east-1',
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   signatureVersion: 'v4',
-  region: 'us-east-1',
   maxRetries: 3,
   httpOptions: {
     timeout: 10000, // 10 segundos
@@ -16,13 +14,17 @@ const s3 = new AWS.S3({
   }
 });
 
-const bucket = process.env.MINIO_BUCKET;
+const bucket = process.env.S3_BUCKET;
+const bucketPrefix = process.env.S3_BUCKET_PREFIX || 'balletemfoco'; // Prefixo dentro do bucket
 
 // Gera URL assinada com expiração otimizada
 function gerarUrlAssinada(key, expiresIn = 3600) {
+  // Adiciona o prefixo ao key se não estiver presente
+  const fullKey = key.startsWith(bucketPrefix) ? key : `${bucketPrefix}/${key}`;
+  
   const params = {
     Bucket: bucket,
-    Key: key,
+    Key: fullKey,
     Expires: expiresIn,
   };
   return s3.getSignedUrl('getObject', params);
@@ -33,9 +35,11 @@ async function listarEventos() {
   try {
     const data = await s3.listObjectsV2({ 
       Bucket: bucket, 
+      Prefix: `${bucketPrefix}/`,
       Delimiter: '/' 
     }).promise();
-    return (data.CommonPrefixes || []).map(prefix => prefix.Prefix.replace('/', ''));
+    return (data.CommonPrefixes || [])
+      .map(prefix => prefix.Prefix.replace(`${bucketPrefix}/`, '').replace('/', ''));
   } catch (error) {
     console.error('Erro ao listar eventos:', error);
     throw error;
@@ -51,10 +55,14 @@ async function contarFotosRecursivo(prefix) {
   }
   total = 0;
   let ContinuationToken = undefined;
+  
+  // Adiciona o prefixo do bucket se não estiver presente
+  const fullPrefix = prefix.startsWith(bucketPrefix) ? prefix : `${bucketPrefix}/${prefix}`;
+  
   do {
     const data = await s3.listObjectsV2({
       Bucket: bucket,
-      Prefix: prefix,
+      Prefix: fullPrefix,
       ContinuationToken,
     }).promise();
     total += (data.Contents || []).filter(obj =>
@@ -82,16 +90,18 @@ async function listarCoreografias(evento, dia = null) {
   if (!coreografias) {
     try {
       const prefix = dia ? `${evento}/${dia}/` : `${evento}/`;
+      const fullPrefix = `${bucketPrefix}/${prefix}`;
       const data = await s3.listObjectsV2({
         Bucket: bucket,
-        Prefix: prefix,
+        Prefix: fullPrefix,
         Delimiter: '/',
       }).promise();
 
       coreografias = await Promise.all(
         (data.CommonPrefixes || []).map(async (p) => {
-          const nome = p.Prefix.replace(prefix, '').replace('/', '');
+          const nome = p.Prefix.replace(fullPrefix, '').replace('/', '');
           const pastaCoreografia = dia ? `${evento}/${dia}/${nome}/` : `${evento}/${nome}/`;
+          const fullPastaCoreografia = `${bucketPrefix}/${pastaCoreografia}`;
 
           // Conta fotos recursivamente
           const quantidade = await contarFotosRecursivo(pastaCoreografia);
@@ -99,7 +109,7 @@ async function listarCoreografias(evento, dia = null) {
           // Lista objetos dentro da coreografia para pegar capa
           const objetos = await s3.listObjectsV2({
             Bucket: bucket,
-            Prefix: pastaCoreografia,
+            Prefix: fullPastaCoreografia,
           }).promise();
 
           const fotos = objetos.Contents.filter(obj =>
@@ -143,30 +153,33 @@ async function listarFotos(evento, coreografia, dia = null) {
   if (!fotos) {
     try {
       const prefix = dia ? `${evento}/${dia}/${coreografia}/` : `${evento}/${coreografia}/`;
+      const fullPrefix = `${bucketPrefix}/${prefix}`;
       // console.log('[MinIO] listarFotos - Prefix:', prefix);
+      // console.log('[MinIO] listarFotos - FullPrefix:', fullPrefix);
       // console.log('[MinIO] listarFotos - Bucket:', bucket);
       
       const data = await s3.listObjectsV2({
         Bucket: bucket,
-        Prefix: prefix,
+        Prefix: fullPrefix,
       }).promise();
       
       // console.log('[MinIO] listarFotos - Objetos encontrados:', data.Contents?.length || 0);
 
       // Monta a URL pública (sem assinatura)
-      const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
+      const region = process.env.AWS_REGION || 'us-east-1';
+      const endpoint = `https://${bucket}.s3.${region}.amazonaws.com`;
       fotos = (data.Contents || [])
         .filter(obj => !obj.Key.endsWith('/'))
         .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
         .map(obj => {
-          const nomeArquivo = obj.Key.replace(prefix, '');
+          const nomeArquivo = obj.Key.replace(fullPrefix, '');
           // Codifica cada parte do caminho separadamente para evitar problemas
           const partesPath = obj.Key.split('/');
           const urlPath = partesPath.map(parte => encodeURIComponent(parte)).join('/');
           
           return {
             nome: nomeArquivo,
-            url: `${endpoint}/${bucket}/${urlPath}`,
+            url: `${endpoint}/${urlPath}`,
           };
         });
 
@@ -190,14 +203,15 @@ async function preCarregarDadosPopulares() {
     await clearAllCache();
     // console.log('🧹 Cache limpo, iniciando nova varredura...');
     
-    // Lista eventos diretamente do MinIO (sem cache)
+    // Lista eventos diretamente do S3 (sem cache)
     // console.log('📂 Varredura de eventos...');
     const data = await s3.listObjectsV2({ 
       Bucket: bucket, 
+      Prefix: `${bucketPrefix}/`,
       Delimiter: '/' 
     }).promise();
     
-    const eventos = (data.CommonPrefixes || []).map(prefix => prefix.Prefix.replace('/', ''));
+    const eventos = (data.CommonPrefixes || []).map(prefix => prefix.Prefix.replace(`${bucketPrefix}/`, '').replace('/', ''));
     // console.log(`✅ Encontrados ${eventos.length} eventos:`, eventos);
     
     // Para cada evento, faz varredura completa
@@ -208,12 +222,12 @@ async function preCarregarDadosPopulares() {
         // Verifica se é um evento multi-dia
         const diasData = await s3.listObjectsV2({
           Bucket: bucket,
-          Prefix: `${evento}/`,
+          Prefix: `${bucketPrefix}/${evento}/`,
           Delimiter: '/',
         }).promise();
         
         const dias = (diasData.CommonPrefixes || [])
-          .map(prefix => prefix.Prefix.replace(`${evento}/`, '').replace('/', ''))
+          .map(prefix => prefix.Prefix.replace(`${bucketPrefix}/${evento}/`, '').replace('/', ''))
           .filter(nome => /^\d{2}-\d{2}-/.test(nome)); // formato DD-MM-dia
         
         if (dias.length > 0) {
@@ -227,14 +241,15 @@ async function preCarregarDadosPopulares() {
               // Lista coreografias do dia
               const coreografiasData = await s3.listObjectsV2({
                 Bucket: bucket,
-                Prefix: `${evento}/${dia}/`,
+                Prefix: `${bucketPrefix}/${evento}/${dia}/`,
                 Delimiter: '/',
               }).promise();
               
               const coreografias = await Promise.all(
                 (coreografiasData.CommonPrefixes || []).map(async (p) => {
-                  const nome = p.Prefix.replace(`${evento}/${dia}/`, '').replace('/', '');
+                  const nome = p.Prefix.replace(`${bucketPrefix}/${evento}/${dia}/`, '').replace('/', '');
                   const pastaCoreografia = `${evento}/${dia}/${nome}/`;
+                  const fullPastaCoreografia = `${bucketPrefix}/${pastaCoreografia}`;
                   
                   // Conta fotos recursivamente
                   const quantidade = await contarFotosRecursivo(pastaCoreografia);
@@ -242,7 +257,7 @@ async function preCarregarDadosPopulares() {
                   // Lista objetos para pegar capa
                   const objetos = await s3.listObjectsV2({
                     Bucket: bucket,
-                    Prefix: pastaCoreografia,
+                    Prefix: fullPastaCoreografia,
                   }).promise();
                   
                   const fotos = objetos.Contents.filter(obj =>
@@ -283,14 +298,15 @@ async function preCarregarDadosPopulares() {
           // Lista coreografias diretamente
           const coreografiasData = await s3.listObjectsV2({
             Bucket: bucket,
-            Prefix: `${evento}/`,
+            Prefix: `${bucketPrefix}/${evento}/`,
             Delimiter: '/',
           }).promise();
           
           const coreografias = await Promise.all(
             (coreografiasData.CommonPrefixes || []).map(async (p) => {
-              const nome = p.Prefix.replace(`${evento}/`, '').replace('/', '');
+              const nome = p.Prefix.replace(`${bucketPrefix}/${evento}/`, '').replace('/', '');
               const pastaCoreografia = `${evento}/${nome}/`;
+              const fullPastaCoreografia = `${bucketPrefix}/${pastaCoreografia}`;
               
               // Conta fotos recursivamente
               const quantidade = await contarFotosRecursivo(pastaCoreografia);
@@ -298,7 +314,7 @@ async function preCarregarDadosPopulares() {
               // Lista objetos para pegar capa
               const objetos = await s3.listObjectsV2({
                 Bucket: bucket,
-                Prefix: pastaCoreografia,
+                Prefix: fullPastaCoreografia,
               }).promise();
               
               const fotos = objetos.Contents.filter(obj =>
@@ -351,9 +367,10 @@ async function listarFotosPorCaminho(caminho) {
   if (!fotos) {
     try {
       const prefix = `${caminho}/`;
+      const fullPrefix = `${bucketPrefix}/${prefix}`;
       const data = await s3.listObjectsV2({
         Bucket: bucket,
-        Prefix: prefix,
+        Prefix: fullPrefix,
       }).promise();
 
       // Monta URLs assinadas para garantir acesso correto
@@ -361,7 +378,7 @@ async function listarFotosPorCaminho(caminho) {
         .filter(obj => !obj.Key.endsWith('/'))
         .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
         .map(obj => {
-          const nomeArquivo = obj.Key.replace(prefix, '');
+          const nomeArquivo = obj.Key.replace(fullPrefix, '');
           // Usar URL assinada para garantir acesso correto
           const urlAssinada = gerarUrlAssinada(obj.Key, 7200); // 2 horas
           
@@ -390,12 +407,12 @@ async function aquecerCacheEvento(evento) {
     // Verifica estrutura do evento
     const data = await s3.listObjectsV2({
       Bucket: bucket,
-      Prefix: `${evento}/`,
+      Prefix: `${bucketPrefix}/${evento}/`,
       Delimiter: '/',
     }).promise();
     
     const prefixes = (data.CommonPrefixes || [])
-      .map(prefix => prefix.Prefix.replace(`${evento}/`, '').replace('/', ''));
+      .map(prefix => prefix.Prefix.replace(`${bucketPrefix}/${evento}/`, '').replace('/', ''));
     
     const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
     
