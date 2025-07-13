@@ -86,7 +86,7 @@ async function setCache(key, data, ttl = 3600, useMemory = false) {
   }
 }
 
-// Função para invalidar cache
+// Função para invalidar cache por padrão
 async function invalidateCache(pattern) {
   try {
     if (redisClient && redisClient.isReady) {
@@ -101,6 +101,22 @@ async function invalidateCache(pattern) {
     return true;
   } catch (error) {
     console.error('Erro ao invalidar cache:', error);
+    return false;
+  }
+}
+
+// Função para limpar uma chave específica do cache
+async function clearCache(key) {
+  try {
+    if (redisClient && redisClient.isReady) {
+      await redisClient.del(key);
+    }
+    
+    // Remove do cache em memória também
+    memoryCache.del(key);
+    return true;
+  } catch (error) {
+    console.error('Erro ao limpar cache:', error);
     return false;
   }
 }
@@ -142,6 +158,7 @@ module.exports = {
   getFromCache,
   setCache,
   invalidateCache,
+  clearCache,
   clearAllCache,
   generateCacheKey,
   isCacheAvailable,
