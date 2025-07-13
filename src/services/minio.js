@@ -453,37 +453,6 @@ async function criarPastaNoS3(nomeEvento) {
   }
 }
 
-// Função para fazer upload de arquivos otimizada
-async function uploadArquivo(arquivo, caminhoDestino) {
-  try {
-    const key = `${bucketPrefix}/${caminhoDestino}`;
-    
-    // Upload otimizado com configurações de performance
-    const uploadParams = {
-      Bucket: bucket,
-      Key: key,
-      Body: arquivo.buffer,
-      ContentType: arquivo.mimetype,
-      // Configurações para melhor performance
-      StorageClass: 'STANDARD',
-      ServerSideEncryption: 'AES256'
-    };
-    
-    // Usar upload gerenciado do AWS SDK para arquivos grandes
-    const upload = s3.upload(uploadParams, {
-      partSize: 10 * 1024 * 1024, // 10MB por parte
-      queueSize: 4, // Máximo 4 partes simultâneas
-    });
-    
-    const result = await upload.promise();
-    return result.Key;
-    
-  } catch (error) {
-    console.error('Erro ao fazer upload do arquivo:', error);
-    throw error;
-  }
-}
-
 module.exports = { 
   s3, 
   bucket, 
@@ -495,6 +464,5 @@ module.exports = {
   preCarregarDadosPopulares,
   aquecerCacheEvento,
   contarFotosRecursivo,
-  criarPastaNoS3,
-  uploadArquivo
+  criarPastaNoS3
 };

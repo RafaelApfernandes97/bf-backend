@@ -4,7 +4,8 @@ const jwt = require('jsonwebtoken');
 const Evento = require('../models/evento');
 const Usuario = require('../models/usuario');
 const Pedido = require('../models/pedido');
-const { listarEventos, criarPastaNoS3, uploadArquivo } = require('../services/minio');
+const FotoIndexada = require('../models/fotoIndexada');
+const { listarEventos, criarPastaNoS3 } = require('../services/minio');
 const TabelaPreco = require('../models/tabelaPreco');
 const { clearAllCache } = require('../services/cache');
 const { preCarregarDadosPopulares } = require('../services/minio');
@@ -12,18 +13,6 @@ const minioService = require('../services/minio');
 const rekognitionService = require('../services/rekognition');
 const path = require('path');
 const sharp = require('sharp');
-const multer = require('multer');
-
-// Configuração do multer para upload otimizado
-const storage = multer.memoryStorage();
-const upload = multer({ 
-  storage: storage,
-  limits: {
-    fileSize: 100 * 1024 * 1024, // 100MB por arquivo
-    files: 50, // Máximo 50 arquivos por request
-    fieldSize: 25 * 1024 * 1024 // 25MB para campos
-  }
-});
 
 // Import bucket prefix from environment
 const bucketPrefix = process.env.S3_BUCKET_PREFIX || 'balletemfoco';
@@ -838,19 +827,44 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
 
     console.log(`[DEBUG] Total de fotos encontradas: ${fotosParaIndexar.length}`);
     
-    // Verificar quais fotos já foram indexadas
-    console.log('[DEBUG] Verificando fotos já indexadas na coleção...');
-    const fotosJaIndexadas = await rekognitionService.listarFacesIndexadas(nomeColecao);
-    console.log(`[DEBUG] Fotos já indexadas: ${fotosJaIndexadas.length}`);
+    // Verificar quais fotos já foram indexadas usando banco de dados
+    console.log('[DEBUG] Verificando fotos já indexadas no banco de dados...');
+    const fotosIndexadasDB = await FotoIndexada.listarPorEvento(evento, 'indexada');
+    const nomesIndexados = fotosIndexadasDB.map(f => f.nomeArquivoNormalizado);
+    console.log(`[DEBUG] Fotos já indexadas no banco: ${nomesIndexados.length}`);
+    
+    // Sincronizar com AWS Rekognition para garantir consistência
+    console.log('[DEBUG] Sincronizando com AWS Rekognition...');
+    const fotosJaIndexadasAWS = await rekognitionService.listarFacesIndexadas(nomeColecao);
+    console.log(`[DEBUG] Fotos na coleção AWS Rekognition: ${fotosJaIndexadasAWS.length}`);
     
     // Filtrar apenas fotos que ainda não foram indexadas
     const fotosNaoIndexadas = fotosParaIndexar.filter(foto => {
       const nomeArquivoNormalizado = normalizarNomeArquivo(path.basename(foto.nome));
-      const jaIndexada = fotosJaIndexadas.includes(nomeArquivoNormalizado);
-      if (jaIndexada) {
-        console.log(`[DEBUG] Pulando foto já indexada: ${foto.nome}`);
+      const jaIndexadaDB = nomesIndexados.includes(nomeArquivoNormalizado);
+      const jaIndexadaAWS = fotosJaIndexadasAWS.includes(nomeArquivoNormalizado);
+      
+      if (jaIndexadaDB && jaIndexadaAWS) {
+        console.log(`[DEBUG] Pulando foto já indexada (DB + AWS): ${foto.nome}`);
+        return false;
+      } else if (jaIndexadaDB && !jaIndexadaAWS) {
+        console.log(`[DEBUG] Foto no DB mas não no AWS - será reindexada: ${foto.nome}`);
+        return true;
+      } else if (!jaIndexadaDB && jaIndexadaAWS) {
+        console.log(`[DEBUG] Foto no AWS mas não no DB - será registrada: ${foto.nome}`);
+        // Registrar no banco de dados
+        FotoIndexada.marcarComoIndexada({
+          evento,
+          nomeArquivo: path.basename(foto.nome),
+          nomeArquivoNormalizado,
+          caminhoCompleto: foto.caminho,
+          s3Key: `${bucketPrefix}/${foto.caminho}/${foto.nome}`,
+          colecaoRekognition: nomeColecao
+        });
+        return false;
       }
-      return !jaIndexada;
+      
+      return true; // Foto não indexada em lugar nenhum
     });
     
     console.log(`[DEBUG] Fotos para indexar (não indexadas): ${fotosNaoIndexadas.length}`);
@@ -866,7 +880,7 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
     if (fotosNaoIndexadas.length === 0) {
       progresso.ativo = false;
       progresso.finalizadoEm = new Date();
-      progresso.fotoAtual = `Indexação já completa! ${fotosJaIndexadas.length} fotos já estavam indexadas.`;
+      progresso.fotoAtual = `Indexação já completa! ${nomesIndexados.length} fotos já estavam indexadas.`;
       progressoIndexacao.set(evento, progresso);
       return;
     }
@@ -913,8 +927,28 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
           console.log(`[DEBUG] Formato ${extensaoOriginal.toUpperCase()} já é compatível com AWS Rekognition.`);
         }
         
+        // Obter metadados da imagem
+        const metadata = await sharp(buffer).metadata();
+        
         // Indexar na coleção Rekognition
-        await rekognitionService.indexarFace(nomeColecao, buffer, nomeArquivoNormalizado);
+        const resultadoIndexacao = await rekognitionService.indexarFace(nomeColecao, buffer, nomeArquivoNormalizado);
+        
+        // Salvar no banco de dados
+        await FotoIndexada.marcarComoIndexada({
+          evento,
+          nomeArquivo: nomeArquivoOriginal,
+          nomeArquivoNormalizado,
+          caminhoCompleto: foto.caminho,
+          s3Key: s3Key,
+          colecaoRekognition: nomeColecao,
+          faceId: resultadoIndexacao.FaceRecords?.[0]?.Face?.FaceId,
+          tamanhoArquivo: objectData.ContentLength,
+          dimensoes: {
+            largura: metadata.width,
+            altura: metadata.height
+          }
+        });
+        
         indexadas++;
         
         // Atualizar progresso com sucesso
@@ -922,8 +956,17 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
         progressoSucesso.indexadas = indexadas;
         progressoIndexacao.set(evento, progressoSucesso);
         
-        console.log(`[DEBUG] [${i + 1}/${fotosNaoIndexadas.length}] Foto indexada com sucesso: ${nomeArquivoNormalizado}`);
+        console.log(`[DEBUG] [${i + 1}/${fotosNaoIndexadas.length}] Foto indexada e salva no DB: ${nomeArquivoNormalizado}`);
       } catch (err) {
+        // Salvar erro no banco de dados
+        try {
+          const nomeArquivoOriginal = path.basename(foto.nome);
+          const nomeArquivoNormalizado = normalizarNomeArquivo(nomeArquivoOriginal);
+          await FotoIndexada.marcarComErro(evento, nomeArquivoNormalizado, err.message);
+        } catch (dbErr) {
+          console.error(`[ERRO] Falha ao salvar erro no banco: ${dbErr.message}`);
+        }
+        
         // Atualizar progresso com erro
         const progressoErro = progressoIndexacao.get(evento);
         progressoErro.erros++;
@@ -935,16 +978,18 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
 
     console.log(`[DEBUG] Indexação finalizada. Total indexadas: ${indexadas} de ${fotosNaoIndexadas.length}`);
     
+    // Obter estatísticas finais do banco de dados
+    const estatisticasFinais = await FotoIndexada.estatisticasEvento(evento);
+    
     // Finalizar progresso
     const progressoFinal = progressoIndexacao.get(evento);
     progressoFinal.ativo = false;
     progressoFinal.finalizadoEm = new Date();
     
     const totalOriginal = fotosParaIndexar.length;
-    const totalJaIndexadas = fotosJaIndexadas.length;
     const totalIndexadas = indexadas;
     
-    progressoFinal.fotoAtual = `Concluído! ${totalIndexadas} novas fotos indexadas. ${totalJaIndexadas} já estavam indexadas. Total: ${totalOriginal} fotos.`;
+    progressoFinal.fotoAtual = `Concluído! ${totalIndexadas} novas fotos indexadas. Total no evento: ${totalOriginal} fotos. Banco de dados: ${estatisticasFinais.indexadas} indexadas, ${estatisticasFinais.erros} com erro.`;
     progressoIndexacao.set(evento, progressoFinal);
     
   } catch (error) {
@@ -958,6 +1003,75 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
       progressoErro.fotoAtual = `Erro durante indexação: ${error.message}`;
       progressoIndexacao.set(evento, progressoErro);
     }
+  }
+});
+
+// Rota para obter estatísticas de indexação de um evento
+router.get('/eventos/:evento/estatisticas-indexacao', authMiddleware, async (req, res) => {
+  try {
+    const { evento } = req.params;
+    
+    // Obter estatísticas do banco de dados
+    const estatisticas = await FotoIndexada.estatisticasEvento(evento);
+    
+    // Obter total de fotos no S3 para comparação
+    let totalFotosS3 = 0;
+    try {
+      const data = await minioService.s3.listObjectsV2({
+        Bucket: minioService.bucket,
+        Prefix: `${bucketPrefix}/${evento}/`,
+        Delimiter: '/',
+      }).promise();
+      
+      const prefixes = (data.CommonPrefixes || []).map(p => p.Prefix.replace(`${bucketPrefix}/${evento}/`, '').replace('/', ''));
+      const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
+      
+      if (dias.length > 0) {
+        // Evento multi-dia
+        for (const dia of dias) {
+          const coreografias = await minioService.listarCoreografias(evento, dia);
+          for (const coreografia of coreografias) {
+            const caminho = `${evento}/${dia}/${coreografia.nome}`;
+            const fotos = await minioService.listarFotosPorCaminho(caminho);
+            totalFotosS3 += fotos.length;
+          }
+        }
+      } else {
+        // Evento de um dia
+        const coreografias = await minioService.listarCoreografias(evento);
+        for (const coreografia of coreografias) {
+          const caminho = `${evento}/${coreografia.nome}`;
+          const fotos = await minioService.listarFotosPorCaminho(caminho);
+          totalFotosS3 += fotos.length;
+        }
+      }
+    } catch (s3Error) {
+      console.error('Erro ao contar fotos no S3:', s3Error);
+    }
+    
+    // Calcular percentual de indexação
+    const percentualIndexado = totalFotosS3 > 0 ? ((estatisticas.indexadas / totalFotosS3) * 100).toFixed(1) : 0;
+    
+    res.json({
+      evento,
+      totalFotosS3,
+      fotosIndexadas: estatisticas.indexadas,
+      fotosComErro: estatisticas.erros,
+      fotosProcessando: estatisticas.processando,
+      fotosNaoIndexadas: Math.max(0, totalFotosS3 - estatisticas.total),
+      percentualIndexado: parseFloat(percentualIndexado),
+      ultimaIndexacao: await FotoIndexada.findOne({ evento, status: 'indexada' })
+        .sort({ indexadaEm: -1 })
+        .select('indexadaEm')
+        .then(doc => doc?.indexadaEm || null)
+    });
+    
+  } catch (error) {
+    console.error('Erro ao obter estatísticas de indexação:', error);
+    res.status(500).json({ 
+      erro: 'Erro ao obter estatísticas de indexação', 
+      detalhes: error.message 
+    });
   }
 });
 
@@ -1105,164 +1219,5 @@ router.post('/eventos/:evento/buscar-fotos-por-selfie', authMiddleware, async (r
   }
 });
 
-// ==== ROTAS DE UPLOAD ====
-
-// Upload de múltiplos arquivos otimizado
-router.post('/upload/:evento', authMiddleware, upload.fields([
-  { name: 'arquivos', maxCount: 100 }, // Aumentado para 100
-  { name: 'caminhos', maxCount: 100 }  // Aumentado para 100
-]), async (req, res) => {
-  try {
-    const { evento } = req.params;
-    const { pasta = '' } = req.body; // pasta opcional dentro do evento
-    const arquivos = req.files['arquivos'] || [];
-    const caminhos = req.body.caminhos || []; // Caminhos relativos para pastas
-    
-    if (!arquivos || arquivos.length === 0) {
-      return res.status(400).json({ error: 'Nenhum arquivo enviado' });
-    }
-    
-    console.log(`Iniciando upload PARALELO de ${arquivos.length} arquivos para evento: ${evento}`);
-    
-    // Upload paralelo com limite de concorrência para melhor performance
-    const maxConcurrent = 5; // Máximo 5 uploads simultâneos no servidor
-    let sucessos = 0;
-    let erros = 0;
-    const resultados = [];
-    
-    // Função para fazer upload de um arquivo
-    const uploadSingleFile = async (arquivo, index) => {
-      try {
-        let caminhoDestino;
-        
-        // Se há caminhos de pasta, usar a estrutura de pasta
-        if (Array.isArray(caminhos) && caminhos[index]) {
-          const caminhoRelativo = caminhos[index];
-          caminhoDestino = `${evento}/${caminhoRelativo}`;
-        } else if (typeof caminhos === 'string' && index === 0) {
-          const caminhoRelativo = caminhos;
-          caminhoDestino = `${evento}/${caminhoRelativo}`;
-        } else {
-          // Construir caminho de destino padrão
-          caminhoDestino = pasta ? 
-            `${evento}/${pasta}/${arquivo.originalname}` : 
-            `${evento}/${arquivo.originalname}`;
-        }
-        
-        // Fazer upload do arquivo
-        const key = await uploadArquivo(arquivo, caminhoDestino);
-        
-        sucessos++;
-        return {
-          arquivo: arquivo.originalname,
-          status: 'sucesso',
-          caminho: key
-        };
-        
-      } catch (error) {
-        console.error(`Erro no upload de ${arquivo.originalname}:`, error);
-        erros++;
-        return {
-          arquivo: arquivo.originalname,
-          status: 'erro',
-          erro: error.message
-        };
-      }
-    };
-    
-    // Processar uploads em paralelo com limite de concorrência
-    const processUploadsWithLimit = async () => {
-      const executing = [];
-      
-      for (let i = 0; i < arquivos.length; i++) {
-        const arquivo = arquivos[i];
-        const uploadPromise = uploadSingleFile(arquivo, i);
-        executing.push(uploadPromise);
-        
-        // Se atingiu o limite de concorrência, aguarda um terminar
-        if (executing.length >= maxConcurrent) {
-          const result = await Promise.race(executing);
-          resultados.push(result);
-          
-          // Remove a promise resolvida da lista
-          const index = executing.findIndex(p => p === uploadPromise);
-          if (index > -1) executing.splice(index, 1);
-        }
-      }
-      
-      // Aguarda todos os uploads restantes terminarem
-      const remainingResults = await Promise.all(executing);
-      resultados.push(...remainingResults);
-    };
-    
-    await processUploadsWithLimit();
-    
-    console.log(`Upload PARALELO concluído: ${sucessos} sucessos, ${erros} erros em ${arquivos.length} arquivos`);
-    
-    res.json({
-      total: arquivos.length,
-      sucessos,
-      erros,
-      resultados
-    });
-    
-  } catch (error) {
-    console.error('Erro geral no upload:', error);
-    res.status(500).json({ error: 'Erro no upload de arquivos' });
-  }
-});
-
-// Upload de arquivo único
-router.post('/upload-single/:evento', authMiddleware, upload.single('arquivo'), async (req, res) => {
-  try {
-    const { evento } = req.params;
-    const { pasta = '' } = req.body;
-    const arquivo = req.file;
-    
-    if (!arquivo) {
-      return res.status(400).json({ error: 'Nenhum arquivo enviado' });
-    }
-    
-    const caminhoDestino = pasta ? 
-      `${evento}/${pasta}/${arquivo.originalname}` : 
-      `${evento}/${arquivo.originalname}`;
-    
-    const key = await uploadArquivo(arquivo, caminhoDestino);
-    
-    res.json({
-      sucesso: true,
-      arquivo: arquivo.originalname,
-      caminho: key
-    });
-    
-  } catch (error) {
-    console.error('Erro no upload:', error);
-    res.status(500).json({ error: 'Erro no upload do arquivo' });
-  }
-});
-
-// Rota para criar nova pasta dentro de um evento
-router.post('/eventos/:evento/pasta', authMiddleware, async (req, res) => {
-  try {
-    const { evento } = req.params;
-    const { nomePasta } = req.body;
-    
-    if (!nomePasta) {
-      return res.status(400).json({ error: 'Nome da pasta é obrigatório' });
-    }
-    
-    const pastaKey = await criarPastaNoS3(`${evento}/${nomePasta}`);
-    
-    res.json({
-      sucesso: true,
-      pasta: nomePasta,
-      caminho: pastaKey
-    });
-    
-  } catch (error) {
-    console.error('Erro ao criar pasta:', error);
-    res.status(500).json({ error: 'Erro ao criar pasta' });
-  }
-});
 
 module.exports = router; 
