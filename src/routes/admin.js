@@ -1106,17 +1106,22 @@ router.post('/eventos/:evento/buscar-fotos-por-selfie', authMiddleware, async (r
 // ==== ROTAS DE UPLOAD ====
 
 // Upload de múltiplos arquivos
-router.post('/upload/:evento', authMiddleware, upload.array('arquivos', 50), async (req, res) => {
+router.post('/upload/:evento', authMiddleware, upload.fields([
+  { name: 'arquivos', maxCount: 50 },
+  { name: 'caminhos', maxCount: 50 }
+]), async (req, res) => {
   try {
     const { evento } = req.params;
     const { pasta = '' } = req.body; // pasta opcional dentro do evento
-    const arquivos = req.files;
+    const arquivos = req.files['arquivos'] || [];
+    const caminhos = req.body.caminhos || []; // Caminhos relativos para pastas
     
     if (!arquivos || arquivos.length === 0) {
       return res.status(400).json({ error: 'Nenhum arquivo enviado' });
     }
     
     console.log(`Iniciando upload de ${arquivos.length} arquivos para evento: ${evento}`);
+    console.log('Caminhos recebidos:', caminhos);
     
     const resultados = [];
     let sucessos = 0;
@@ -1125,10 +1130,23 @@ router.post('/upload/:evento', authMiddleware, upload.array('arquivos', 50), asy
     for (let i = 0; i < arquivos.length; i++) {
       const arquivo = arquivos[i];
       try {
-        // Construir caminho de destino
-        const caminhoDestino = pasta ? 
-          `${evento}/${pasta}/${arquivo.originalname}` : 
-          `${evento}/${arquivo.originalname}`;
+        let caminhoDestino;
+        
+        // Se há caminhos de pasta, usar a estrutura de pasta
+        if (Array.isArray(caminhos) && caminhos[i]) {
+          // Remove o primeiro nível do caminho (nome da pasta selecionada)
+          const caminhoRelativo = caminhos[i];
+          caminhoDestino = `${evento}/${caminhoRelativo}`;
+        } else if (typeof caminhos === 'string' && i === 0) {
+          // Caso especial para um único arquivo
+          const caminhoRelativo = caminhos;
+          caminhoDestino = `${evento}/${caminhoRelativo}`;
+        } else {
+          // Construir caminho de destino padrão
+          caminhoDestino = pasta ? 
+            `${evento}/${pasta}/${arquivo.originalname}` : 
+            `${evento}/${arquivo.originalname}`;
+        }
         
         // Fazer upload do arquivo
         const key = await uploadArquivo(arquivo, caminhoDestino);
