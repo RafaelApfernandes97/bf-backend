@@ -7,11 +7,13 @@ const router = express.Router();
 // Rota pública para buscar todos os eventos com detalhes de preço
 router.get('/eventos', async (req, res) => {
   try {
+    console.log('[DEBUG] Requisição para /api/public/eventos recebida');
     const eventos = await Evento.find().populate('tabelaPrecoId');
+    console.log(`[DEBUG] ${eventos.length} eventos encontrados`);
     res.json(eventos);
   } catch (error) {
     console.error('Erro ao buscar eventos públicos:', error);
-    res.status(500).json({ error: 'Erro ao buscar eventos' });
+    res.status(500).json({ error: 'Erro ao buscar eventos', detalhes: error.message });
   }
 });
 

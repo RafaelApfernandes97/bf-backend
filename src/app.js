@@ -10,28 +10,36 @@ const app = express();
 // Middlewares
 const corsOptions = {
   origin: function (origin, callback) {
-    // Em desenvolvimento, aceita qualquer origem
-    if (process.env.NODE_ENV === 'development') {
+    // Lista de origens permitidas
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://t:3000',
+      'http://127.0.0.1:3000',
+      'http://127.0.0.1:3001',
+      'https://backend.rfsolutionbr.com.br',
+      'https://site-frontend.cbltmp.easypanel.host',
+      'http://site-frontend.cbltmp.easypanel.host',
+      'https://foto.oballetemfoco.com',
+      'https://fotos.rfsolutionbr.com.br'
+    ];
+
+    // Em desenvolvimento ou se NODE_ENV não está definido, aceita localhost
+    const isDev = !process.env.NODE_ENV || process.env.NODE_ENV === 'development';
+    const isLocalhost = origin && (origin.includes('localhost') || origin.includes('127.0.0.1'));
+    
+    if (isDev && isLocalhost) {
+      callback(null, true);
+      return;
+    }
+
+    // Verifica se a origem está na lista permitida
+    const ok = !origin || allowedOrigins.some(o => origin.startsWith(o));
+    if (ok) {
       callback(null, true);
     } else {
-      const allowedOrigins = [
-        'http://t:3000',
-        'http://127.0.0.1:3000',
-        'https://backend.rfsolutionbr.com.br',
-        'http://127.0.0.1:3001',
-        'https://site-frontend.cbltmp.easypanel.host',
-        'http://site-frontend.cbltmp.easypanel.host',
-        'https://foto.oballetemfoco.com',
-        'https://fotos.rfsolutionbr.com.br'
-      ];
-
-      const ok = !origin || allowedOrigins.some(o => origin.startsWith(o));
-      if (ok) {
-        callback(null, true);
-      } else {
-        console.warn('[CORS] Origem não permitida:', origin);
-        callback(new Error('Not allowed by CORS'));
-      }
+      console.warn('[CORS] Origem não permitida:', origin);
+      callback(null, true); // Temporariamente permitir todas as origens para debug
     }
   },
   credentials: true,
