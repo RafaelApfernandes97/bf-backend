@@ -14,12 +14,14 @@ const path = require('path');
 const sharp = require('sharp');
 const multer = require('multer');
 
-// Configuração do multer para upload
+// Configuração do multer para upload otimizado
 const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
   limits: {
-    fileSize: 100 * 1024 * 1024 // 100MB
+    fileSize: 100 * 1024 * 1024, // 100MB por arquivo
+    files: 50, // Máximo 50 arquivos por request
+    fieldSize: 25 * 1024 * 1024 // 25MB para campos
   }
 });
 
@@ -1105,10 +1107,10 @@ router.post('/eventos/:evento/buscar-fotos-por-selfie', authMiddleware, async (r
 
 // ==== ROTAS DE UPLOAD ====
 
-// Upload de múltiplos arquivos
+// Upload de múltiplos arquivos otimizado
 router.post('/upload/:evento', authMiddleware, upload.fields([
-  { name: 'arquivos', maxCount: 50 },
-  { name: 'caminhos', maxCount: 50 }
+  { name: 'arquivos', maxCount: 100 }, // Aumentado para 100
+  { name: 'caminhos', maxCount: 100 }  // Aumentado para 100
 ]), async (req, res) => {
   try {
     const { evento } = req.params;
@@ -1120,25 +1122,24 @@ router.post('/upload/:evento', authMiddleware, upload.fields([
       return res.status(400).json({ error: 'Nenhum arquivo enviado' });
     }
     
-    console.log(`Iniciando upload de ${arquivos.length} arquivos para evento: ${evento}`);
-    console.log('Caminhos recebidos:', caminhos);
+    console.log(`Iniciando upload PARALELO de ${arquivos.length} arquivos para evento: ${evento}`);
     
-    const resultados = [];
+    // Upload paralelo com limite de concorrência para melhor performance
+    const maxConcurrent = 5; // Máximo 5 uploads simultâneos no servidor
     let sucessos = 0;
     let erros = 0;
+    const resultados = [];
     
-    for (let i = 0; i < arquivos.length; i++) {
-      const arquivo = arquivos[i];
+    // Função para fazer upload de um arquivo
+    const uploadSingleFile = async (arquivo, index) => {
       try {
         let caminhoDestino;
         
         // Se há caminhos de pasta, usar a estrutura de pasta
-        if (Array.isArray(caminhos) && caminhos[i]) {
-          // Remove o primeiro nível do caminho (nome da pasta selecionada)
-          const caminhoRelativo = caminhos[i];
+        if (Array.isArray(caminhos) && caminhos[index]) {
+          const caminhoRelativo = caminhos[index];
           caminhoDestino = `${evento}/${caminhoRelativo}`;
-        } else if (typeof caminhos === 'string' && i === 0) {
-          // Caso especial para um único arquivo
+        } else if (typeof caminhos === 'string' && index === 0) {
           const caminhoRelativo = caminhos;
           caminhoDestino = `${evento}/${caminhoRelativo}`;
         } else {
@@ -1151,29 +1152,52 @@ router.post('/upload/:evento', authMiddleware, upload.fields([
         // Fazer upload do arquivo
         const key = await uploadArquivo(arquivo, caminhoDestino);
         
-        resultados.push({
+        sucessos++;
+        return {
           arquivo: arquivo.originalname,
           status: 'sucesso',
           caminho: key
-        });
-        
-        sucessos++;
-        
-        // Enviar progresso para o cliente (opcional)
-        console.log(`Upload ${i + 1}/${arquivos.length}: ${arquivo.originalname} - Sucesso`);
+        };
         
       } catch (error) {
         console.error(`Erro no upload de ${arquivo.originalname}:`, error);
-        
-        resultados.push({
+        erros++;
+        return {
           arquivo: arquivo.originalname,
           status: 'erro',
           erro: error.message
-        });
-        
-        erros++;
+        };
       }
-    }
+    };
+    
+    // Processar uploads em paralelo com limite de concorrência
+    const processUploadsWithLimit = async () => {
+      const executing = [];
+      
+      for (let i = 0; i < arquivos.length; i++) {
+        const arquivo = arquivos[i];
+        const uploadPromise = uploadSingleFile(arquivo, i);
+        executing.push(uploadPromise);
+        
+        // Se atingiu o limite de concorrência, aguarda um terminar
+        if (executing.length >= maxConcurrent) {
+          const result = await Promise.race(executing);
+          resultados.push(result);
+          
+          // Remove a promise resolvida da lista
+          const index = executing.findIndex(p => p === uploadPromise);
+          if (index > -1) executing.splice(index, 1);
+        }
+      }
+      
+      // Aguarda todos os uploads restantes terminarem
+      const remainingResults = await Promise.all(executing);
+      resultados.push(...remainingResults);
+    };
+    
+    await processUploadsWithLimit();
+    
+    console.log(`Upload PARALELO concluído: ${sucessos} sucessos, ${erros} erros em ${arquivos.length} arquivos`);
     
     res.json({
       total: arquivos.length,
