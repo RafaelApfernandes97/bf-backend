@@ -964,22 +964,28 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
         });
         
         // Etapa 5: Salvar no banco de dados com retry
-        await retryWithBackoff(async () => {
-          return await FotoIndexada.marcarComoIndexada({
-            evento,
-            nomeArquivo: nomeArquivoOriginal,
-            nomeArquivoNormalizado,
-            caminhoCompleto: foto.caminho,
-            s3Key: s3Key,
-            colecaoRekognition: nomeColecao,
-            faceId: resultadoIndexacao.FaceRecords?.[0]?.Face?.FaceId,
-            tamanhoArquivo: objectData.ContentLength,
-            dimensoes: {
-              largura: metadata.width,
-              altura: metadata.height
-            }
-          });
+        const dadosFoto = {
+          evento,
+          nomeArquivo: nomeArquivoOriginal,
+          nomeArquivoNormalizado,
+          caminhoCompleto: foto.caminho,
+          s3Key: s3Key,
+          colecaoRekognition: nomeColecao,
+          faceId: resultadoIndexacao.FaceRecords?.[0]?.Face?.FaceId,
+          tamanhoArquivo: objectData.ContentLength,
+          dimensoes: {
+            largura: metadata.width,
+            altura: metadata.height
+          }
+        };
+        
+        console.log(`[DEBUG] Salvando no banco - Evento: ${evento}, Foto: ${nomeArquivoNormalizado}`);
+        
+        const fotoSalva = await retryWithBackoff(async () => {
+          return await FotoIndexada.marcarComoIndexada(dadosFoto);
         });
+        
+        console.log(`[DEBUG] ✅ Foto salva no banco com ID: ${fotoSalva._id}`);
         
         indexadas++;
         console.log(`[DEBUG] ✅ [${index + 1}/${fotosNaoIndexadas.length}] Sucesso: ${nomeArquivoOriginal}`);
@@ -1081,8 +1087,12 @@ router.get('/eventos/:evento/estatisticas-indexacao', authMiddleware, async (req
   try {
     const { evento } = req.params;
     
+    console.log(`[DEBUG] Buscando estatísticas para evento: ${evento}`);
+    
     // Obter estatísticas do banco de dados
     const estatisticas = await FotoIndexada.estatisticasEvento(evento);
+    
+    console.log(`[DEBUG] Estatísticas do banco:`, estatisticas);
     
     // Obter total de fotos no S3 para comparação
     let totalFotosS3 = 0;
@@ -1140,6 +1150,50 @@ router.get('/eventos/:evento/estatisticas-indexacao', authMiddleware, async (req
     console.error('Erro ao obter estatísticas de indexação:', error);
     res.status(500).json({ 
       erro: 'Erro ao obter estatísticas de indexação', 
+      detalhes: error.message 
+    });
+  }
+});
+
+// Rota de diagnóstico para verificar dados no banco
+router.get('/eventos/:evento/diagnostico-indexacao', authMiddleware, async (req, res) => {
+  try {
+    const { evento } = req.params;
+    
+    console.log(`[DEBUG] Diagnóstico para evento: ${evento}`);
+    
+    // Buscar todas as fotos indexadas deste evento
+    const fotosIndexadas = await FotoIndexada.find({ evento }).sort({ indexadaEm: -1 });
+    
+    // Estatísticas detalhadas
+    const estatisticasPorStatus = await FotoIndexada.aggregate([
+      { $match: { evento } },
+      { $group: { _id: '$status', count: { $sum: 1 }, fotos: { $push: '$nomeArquivo' } } }
+    ]);
+    
+    // Últimas 10 fotos indexadas
+    const ultimasFotos = await FotoIndexada.find({ evento, status: 'indexada' })
+      .sort({ indexadaEm: -1 })
+      .limit(10)
+      .select('nomeArquivo indexadaEm');
+    
+    const diagnostico = {
+      evento,
+      totalRegistros: fotosIndexadas.length,
+      estatisticasPorStatus,
+      ultimasFotos,
+      primeiraIndexacao: fotosIndexadas.length > 0 ? fotosIndexadas[fotosIndexadas.length - 1].indexadaEm : null,
+      ultimaIndexacao: fotosIndexadas.length > 0 ? fotosIndexadas[0].indexadaEm : null
+    };
+    
+    console.log(`[DEBUG] Diagnóstico completo:`, diagnostico);
+    
+    res.json(diagnostico);
+    
+  } catch (error) {
+    console.error('Erro no diagnóstico:', error);
+    res.status(500).json({ 
+      erro: 'Erro no diagnóstico', 
       detalhes: error.message 
     });
   }

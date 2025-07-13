@@ -70,6 +70,12 @@ fotoIndexadaSchema.statics.jaIndexada = async function(evento, nomeArquivoNormal
 
 // Método estático para obter estatísticas de indexação de um evento
 fotoIndexadaSchema.statics.estatisticasEvento = async function(evento) {
+  console.log(`[DEBUG] Executando query de estatísticas para evento: ${evento}`);
+  
+  // Primeiro, verificar se existem registros para este evento
+  const totalRegistros = await this.countDocuments({ evento });
+  console.log(`[DEBUG] Total de registros encontrados para evento ${evento}: ${totalRegistros}`);
+  
   const resultado = await this.aggregate([
     { $match: { evento } },
     {
@@ -79,6 +85,8 @@ fotoIndexadaSchema.statics.estatisticasEvento = async function(evento) {
       }
     }
   ]);
+  
+  console.log(`[DEBUG] Resultado da agregação:`, resultado);
   
   const stats = {
     indexadas: 0,
@@ -92,12 +100,16 @@ fotoIndexadaSchema.statics.estatisticasEvento = async function(evento) {
     stats.total += item.count;
   });
   
+  console.log(`[DEBUG] Estatísticas finais:`, stats);
+  
   return stats;
 };
 
 // Método estático para marcar foto como indexada
 fotoIndexadaSchema.statics.marcarComoIndexada = async function(dadosFoto) {
-  return this.findOneAndUpdate(
+  console.log(`[DEBUG] Tentando salvar foto no banco - Evento: ${dadosFoto.evento}, Nome: ${dadosFoto.nomeArquivoNormalizado}`);
+  
+  const resultado = await this.findOneAndUpdate(
     { 
       evento: dadosFoto.evento, 
       nomeArquivoNormalizado: dadosFoto.nomeArquivoNormalizado 
@@ -112,6 +124,10 @@ fotoIndexadaSchema.statics.marcarComoIndexada = async function(dadosFoto) {
       new: true 
     }
   );
+  
+  console.log(`[DEBUG] Foto salva no banco com sucesso - ID: ${resultado._id}, Status: ${resultado.status}`);
+  
+  return resultado;
 };
 
 // Método estático para marcar foto com erro
