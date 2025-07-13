@@ -432,6 +432,46 @@ async function aquecerCacheEvento(evento) {
   }
 }
 
+// Função para criar pasta no S3
+async function criarPastaNoS3(nomeEvento) {
+  try {
+    const pastaKey = `${bucketPrefix}/${nomeEvento}/`;
+    
+    // Criar um arquivo vazio para criar a "pasta"
+    await s3.putObject({
+      Bucket: bucket,
+      Key: pastaKey,
+      Body: '',
+      ContentType: 'application/x-directory'
+    }).promise();
+    
+    console.log(`Pasta criada no S3: ${pastaKey}`);
+    return pastaKey;
+  } catch (error) {
+    console.error('Erro ao criar pasta no S3:', error);
+    throw error;
+  }
+}
+
+// Função para fazer upload de arquivos
+async function uploadArquivo(arquivo, caminhoDestino) {
+  try {
+    const key = `${bucketPrefix}/${caminhoDestino}`;
+    
+    await s3.upload({
+      Bucket: bucket,
+      Key: key,
+      Body: arquivo.buffer,
+      ContentType: arquivo.mimetype
+    }).promise();
+    
+    return key;
+  } catch (error) {
+    console.error('Erro ao fazer upload do arquivo:', error);
+    throw error;
+  }
+}
+
 module.exports = { 
   s3, 
   bucket, 
@@ -442,5 +482,7 @@ module.exports = {
   listarFotosPorCaminho,
   preCarregarDadosPopulares,
   aquecerCacheEvento,
-  contarFotosRecursivo // garantir exportação
+  contarFotosRecursivo,
+  criarPastaNoS3,
+  uploadArquivo
 };

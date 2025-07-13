@@ -49,4 +49,36 @@ module.exports = {
     };
     return rekognition.searchFacesByImage(params).promise();
   },
+
+  async listarFacesIndexadas(nomeColecao) {
+    try {
+      const params = {
+        CollectionId: nomeColecao,
+        MaxResults: 4096 // Máximo permitido pelo AWS
+      };
+      
+      let todasAsFaces = [];
+      let nextToken = null;
+      
+      do {
+        if (nextToken) {
+          params.NextToken = nextToken;
+        }
+        
+        const result = await rekognition.listFaces(params).promise();
+        todasAsFaces = todasAsFaces.concat(result.Faces || []);
+        nextToken = result.NextToken;
+        
+      } while (nextToken);
+      
+      // Retorna apenas os ExternalImageIds para comparação
+      return todasAsFaces.map(face => face.ExternalImageId).filter(id => id);
+      
+    } catch (err) {
+      if (err.code === 'ResourceNotFoundException') {
+        return []; // Coleção não existe ainda
+      }
+      throw err;
+    }
+  },
 }; 

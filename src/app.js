@@ -15,7 +15,7 @@ const corsOptions = {
       callback(null, true);
     } else {
       const allowedOrigins = [
-        'http://localhost:3000',
+        'http://t:3000',
         'http://127.0.0.1:3000',
         'https://backend.rfsolutionbr.com.br',
         'http://127.0.0.1:3001',

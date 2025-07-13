@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const Evento = require('../models/evento');
 const Usuario = require('../models/usuario');
 const Pedido = require('../models/pedido');
-const { listarEventos } = require('../services/minio');
+const { listarEventos, criarPastaNoS3, uploadArquivo } = require('../services/minio');
 const TabelaPreco = require('../models/tabelaPreco');
 const { clearAllCache } = require('../services/cache');
 const { preCarregarDadosPopulares } = require('../services/minio');
@@ -12,6 +12,16 @@ const minioService = require('../services/minio');
 const rekognitionService = require('../services/rekognition');
 const path = require('path');
 const sharp = require('sharp');
+const multer = require('multer');
+
+// Configuração do multer para upload
+const storage = multer.memoryStorage();
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 100 * 1024 * 1024 // 100MB
+  }
+});
 
 // Import bucket prefix from environment
 const bucketPrefix = process.env.S3_BUCKET_PREFIX || 'balletemfoco';
@@ -96,10 +106,37 @@ router.get('/eventos', authMiddleware, async (req, res) => {
 });
 
 router.post('/eventos', authMiddleware, async (req, res) => {
-  const { nome, data, local, tabelaPrecoId, valorFixo } = req.body;
-  const evento = await Evento.create({ nome, data, local, tabelaPrecoId, valorFixo });
-  await evento.populate('tabelaPrecoId');
-  res.json(evento);
+  try {
+    const { nome, data, local, tabelaPrecoId, valorFixo, criarPasta = false } = req.body;
+    
+    let pastaS3 = null;
+    
+    // Se solicitado, cria a pasta no S3
+    if (criarPasta && nome) {
+      try {
+        pastaS3 = await criarPastaNoS3(nome);
+        console.log(`Pasta criada no S3 para evento: ${nome}`);
+      } catch (error) {
+        console.error('Erro ao criar pasta no S3:', error);
+        return res.status(500).json({ error: 'Erro ao criar pasta no S3' });
+      }
+    }
+    
+    const evento = await Evento.create({ 
+      nome, 
+      data, 
+      local, 
+      tabelaPrecoId, 
+      valorFixo, 
+      pastaS3 
+    });
+    
+    await evento.populate('tabelaPrecoId');
+    res.json(evento);
+  } catch (error) {
+    console.error('Erro ao criar evento:', error);
+    res.status(500).json({ error: 'Erro ao criar evento' });
+  }
 });
 
 router.put('/eventos/:id', authMiddleware, async (req, res) => {
@@ -797,28 +834,55 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
       }
     }
 
-    console.log(`[DEBUG] Total de fotos para indexar: ${fotosParaIndexar.length}`);
+    console.log(`[DEBUG] Total de fotos encontradas: ${fotosParaIndexar.length}`);
     
-    // Atualizar progresso com total de fotos
+    // Verificar quais fotos já foram indexadas
+    console.log('[DEBUG] Verificando fotos já indexadas na coleção...');
+    const fotosJaIndexadas = await rekognitionService.listarFacesIndexadas(nomeColecao);
+    console.log(`[DEBUG] Fotos já indexadas: ${fotosJaIndexadas.length}`);
+    
+    // Filtrar apenas fotos que ainda não foram indexadas
+    const fotosNaoIndexadas = fotosParaIndexar.filter(foto => {
+      const nomeArquivoNormalizado = normalizarNomeArquivo(path.basename(foto.nome));
+      const jaIndexada = fotosJaIndexadas.includes(nomeArquivoNormalizado);
+      if (jaIndexada) {
+        console.log(`[DEBUG] Pulando foto já indexada: ${foto.nome}`);
+      }
+      return !jaIndexada;
+    });
+    
+    console.log(`[DEBUG] Fotos para indexar (não indexadas): ${fotosNaoIndexadas.length}`);
+    console.log(`[DEBUG] Fotos puladas (já indexadas): ${fotosParaIndexar.length - fotosNaoIndexadas.length}`);
+    
+    // Atualizar progresso com total de fotos não indexadas
     const progresso = progressoIndexacao.get(evento);
-    progresso.total = fotosParaIndexar.length;
-    progresso.fotoAtual = 'Iniciando indexação...';
+    progresso.total = fotosNaoIndexadas.length;
+    progresso.fotoAtual = fotosNaoIndexadas.length === 0 ? 'Todas as fotos já foram indexadas!' : 'Iniciando indexação...';
     progressoIndexacao.set(evento, progresso);
+    
+    // Se não há fotos para indexar, finalizar imediatamente
+    if (fotosNaoIndexadas.length === 0) {
+      progresso.ativo = false;
+      progresso.finalizadoEm = new Date();
+      progresso.fotoAtual = `Indexação já completa! ${fotosJaIndexadas.length} fotos já estavam indexadas.`;
+      progressoIndexacao.set(evento, progresso);
+      return;
+    }
     
     // Indexar cada foto na coleção Rekognition
     let indexadas = 0;
-    for (let i = 0; i < fotosParaIndexar.length; i++) {
-      const foto = fotosParaIndexar[i];
+    for (let i = 0; i < fotosNaoIndexadas.length; i++) {
+      const foto = fotosNaoIndexadas[i];
       try {
         // Atualizar progresso
         const progressoAtual = progressoIndexacao.get(evento);
         progressoAtual.processadas = i + 1;
-        progressoAtual.fotoAtual = `Processando: ${path.basename(foto.nome)} (${i + 1}/${fotosParaIndexar.length})`;
+        progressoAtual.fotoAtual = `Processando: ${path.basename(foto.nome)} (${i + 1}/${fotosNaoIndexadas.length})`;
         progressoIndexacao.set(evento, progressoAtual);
         
         // Construir a chave S3 correta a partir do caminho e nome da foto
         const s3Key = `${bucketPrefix}/${foto.caminho}/${foto.nome}`;
-        console.log(`[DEBUG] [${i + 1}/${fotosParaIndexar.length}] Baixando foto via S3: ${s3Key}`);
+        console.log(`[DEBUG] [${i + 1}/${fotosNaoIndexadas.length}] Baixando foto via S3: ${s3Key}`);
         // Baixar imagem diretamente do S3 usando S3 client
         const objectData = await minioService.s3.getObject({
           Bucket: minioService.bucket,
@@ -856,24 +920,29 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
         progressoSucesso.indexadas = indexadas;
         progressoIndexacao.set(evento, progressoSucesso);
         
-        console.log(`[DEBUG] [${i + 1}/${fotosParaIndexar.length}] Foto indexada com sucesso: ${nomeArquivoNormalizado}`);
+        console.log(`[DEBUG] [${i + 1}/${fotosNaoIndexadas.length}] Foto indexada com sucesso: ${nomeArquivoNormalizado}`);
       } catch (err) {
         // Atualizar progresso com erro
         const progressoErro = progressoIndexacao.get(evento);
         progressoErro.erros++;
         progressoIndexacao.set(evento, progressoErro);
         
-        console.error(`[ERRO] [${i + 1}/${fotosParaIndexar.length}] Erro ao indexar foto: ${foto.nome} | Motivo: ${err.message}`);
+        console.error(`[ERRO] [${i + 1}/${fotosNaoIndexadas.length}] Erro ao indexar foto: ${foto.nome} | Motivo: ${err.message}`);
       }
     }
 
-    console.log(`[DEBUG] Indexação finalizada. Total indexadas: ${indexadas} de ${fotosParaIndexar.length}`);
+    console.log(`[DEBUG] Indexação finalizada. Total indexadas: ${indexadas} de ${fotosNaoIndexadas.length}`);
     
     // Finalizar progresso
     const progressoFinal = progressoIndexacao.get(evento);
     progressoFinal.ativo = false;
     progressoFinal.finalizadoEm = new Date();
-    progressoFinal.fotoAtual = `Concluído! ${indexadas} fotos indexadas de ${fotosParaIndexar.length}`;
+    
+    const totalOriginal = fotosParaIndexar.length;
+    const totalJaIndexadas = fotosJaIndexadas.length;
+    const totalIndexadas = indexadas;
+    
+    progressoFinal.fotoAtual = `Concluído! ${totalIndexadas} novas fotos indexadas. ${totalJaIndexadas} já estavam indexadas. Total: ${totalOriginal} fotos.`;
     progressoIndexacao.set(evento, progressoFinal);
     
   } catch (error) {
@@ -1031,6 +1100,126 @@ router.post('/eventos/:evento/buscar-fotos-por-selfie', authMiddleware, async (r
   } catch (error) {
     console.error('[ERRO] Erro ao buscar fotos por selfie:', error);
     res.status(500).json({ erro: 'Erro ao buscar fotos por selfie', detalhes: error.message });
+  }
+});
+
+// ==== ROTAS DE UPLOAD ====
+
+// Upload de múltiplos arquivos
+router.post('/upload/:evento', authMiddleware, upload.array('arquivos', 50), async (req, res) => {
+  try {
+    const { evento } = req.params;
+    const { pasta = '' } = req.body; // pasta opcional dentro do evento
+    const arquivos = req.files;
+    
+    if (!arquivos || arquivos.length === 0) {
+      return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+    }
+    
+    console.log(`Iniciando upload de ${arquivos.length} arquivos para evento: ${evento}`);
+    
+    const resultados = [];
+    let sucessos = 0;
+    let erros = 0;
+    
+    for (let i = 0; i < arquivos.length; i++) {
+      const arquivo = arquivos[i];
+      try {
+        // Construir caminho de destino
+        const caminhoDestino = pasta ? 
+          `${evento}/${pasta}/${arquivo.originalname}` : 
+          `${evento}/${arquivo.originalname}`;
+        
+        // Fazer upload do arquivo
+        const key = await uploadArquivo(arquivo, caminhoDestino);
+        
+        resultados.push({
+          arquivo: arquivo.originalname,
+          status: 'sucesso',
+          caminho: key
+        });
+        
+        sucessos++;
+        
+        // Enviar progresso para o cliente (opcional)
+        console.log(`Upload ${i + 1}/${arquivos.length}: ${arquivo.originalname} - Sucesso`);
+        
+      } catch (error) {
+        console.error(`Erro no upload de ${arquivo.originalname}:`, error);
+        
+        resultados.push({
+          arquivo: arquivo.originalname,
+          status: 'erro',
+          erro: error.message
+        });
+        
+        erros++;
+      }
+    }
+    
+    res.json({
+      total: arquivos.length,
+      sucessos,
+      erros,
+      resultados
+    });
+    
+  } catch (error) {
+    console.error('Erro geral no upload:', error);
+    res.status(500).json({ error: 'Erro no upload de arquivos' });
+  }
+});
+
+// Upload de arquivo único
+router.post('/upload-single/:evento', authMiddleware, upload.single('arquivo'), async (req, res) => {
+  try {
+    const { evento } = req.params;
+    const { pasta = '' } = req.body;
+    const arquivo = req.file;
+    
+    if (!arquivo) {
+      return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+    }
+    
+    const caminhoDestino = pasta ? 
+      `${evento}/${pasta}/${arquivo.originalname}` : 
+      `${evento}/${arquivo.originalname}`;
+    
+    const key = await uploadArquivo(arquivo, caminhoDestino);
+    
+    res.json({
+      sucesso: true,
+      arquivo: arquivo.originalname,
+      caminho: key
+    });
+    
+  } catch (error) {
+    console.error('Erro no upload:', error);
+    res.status(500).json({ error: 'Erro no upload do arquivo' });
+  }
+});
+
+// Rota para criar nova pasta dentro de um evento
+router.post('/eventos/:evento/pasta', authMiddleware, async (req, res) => {
+  try {
+    const { evento } = req.params;
+    const { nomePasta } = req.body;
+    
+    if (!nomePasta) {
+      return res.status(400).json({ error: 'Nome da pasta é obrigatório' });
+    }
+    
+    const pastaKey = await criarPastaNoS3(`${evento}/${nomePasta}`);
+    
+    res.json({
+      sucesso: true,
+      pasta: nomePasta,
+      caminho: pastaKey
+    });
+    
+  } catch (error) {
+    console.error('Erro ao criar pasta:', error);
+    res.status(500).json({ error: 'Erro ao criar pasta' });
   }
 });
 
