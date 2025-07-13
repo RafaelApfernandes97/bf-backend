@@ -885,96 +885,166 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
       return;
     }
     
-    // Indexar cada foto na coleção Rekognition
+    // Configurações de processamento paralelo
+    const MAX_CONCURRENT = parseInt(process.env.INDEXACAO_CONCURRENT || '8'); // Máximo 8 fotos simultâneas
+    const BATCH_SIZE = parseInt(process.env.INDEXACAO_BATCH_SIZE || '20'); // Lotes de 20 fotos
+    const RETRY_ATTEMPTS = parseInt(process.env.INDEXACAO_RETRY_ATTEMPTS || '3'); // Tentativas de retry
+    const RETRY_DELAY = parseInt(process.env.INDEXACAO_RETRY_DELAY || '1000'); // Delay entre retries
+    
+    console.log(`[DEBUG] Iniciando indexação PARALELA: ${MAX_CONCURRENT} concurrent, lotes de ${BATCH_SIZE}`);
+    
+    // Contadores compartilhados (thread-safe com Map)
+    let processadas = 0;
     let indexadas = 0;
-    for (let i = 0; i < fotosNaoIndexadas.length; i++) {
-      const foto = fotosNaoIndexadas[i];
+    let erros = 0;
+    
+    // Função de retry com backoff exponencial
+    const retryWithBackoff = async (fn, tentativas = RETRY_ATTEMPTS, delay = RETRY_DELAY) => {
+      for (let i = 0; i < tentativas; i++) {
+        try {
+          return await fn();
+        } catch (error) {
+          const isLastAttempt = i === tentativas - 1;
+          
+          // Verifica se é um erro que vale a pena fazer retry
+          const shouldRetry = 
+            error.code === 'ThrottlingException' ||
+            error.code === 'ProvisionedThroughputExceededException' ||
+            error.code === 'ServiceUnavailable' ||
+            error.code === 'InternalServerError' ||
+            error.code === 'RequestTimeout' ||
+            error.statusCode >= 500;
+          
+          if (isLastAttempt || !shouldRetry) {
+            throw error;
+          }
+          
+          const waitTime = delay * Math.pow(2, i); // Backoff exponencial
+          console.log(`[RETRY] Tentativa ${i + 1}/${tentativas} falhou: ${error.message}. Aguardando ${waitTime}ms...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+      }
+    };
+
+    // Função para processar uma única foto com retry
+    const processarFoto = async (foto, index) => {
+      const nomeArquivoOriginal = path.basename(foto.nome);
+      const nomeArquivoNormalizado = normalizarNomeArquivo(nomeArquivoOriginal);
+      const s3Key = `${bucketPrefix}/${foto.caminho}/${foto.nome}`;
+      
       try {
-        // Atualizar progresso
-        const progressoAtual = progressoIndexacao.get(evento);
-        progressoAtual.processadas = i + 1;
-        progressoAtual.fotoAtual = `Processando: ${path.basename(foto.nome)} (${i + 1}/${fotosNaoIndexadas.length})`;
-        progressoIndexacao.set(evento, progressoAtual);
+        console.log(`[DEBUG] [${index + 1}/${fotosNaoIndexadas.length}] Iniciando processamento: ${nomeArquivoOriginal}`);
         
-        // Construir a chave S3 correta a partir do caminho e nome da foto
-        const s3Key = `${bucketPrefix}/${foto.caminho}/${foto.nome}`;
-        console.log(`[DEBUG] [${i + 1}/${fotosNaoIndexadas.length}] Baixando foto via S3: ${s3Key}`);
-        // Baixar imagem diretamente do S3 usando S3 client
-        const objectData = await minioService.s3.getObject({
-          Bucket: minioService.bucket,
-          Key: s3Key
-        }).promise();
+        // Etapa 1: Baixar imagem do S3 com retry
+        const objectData = await retryWithBackoff(async () => {
+          return await minioService.s3.getObject({
+            Bucket: minioService.bucket,
+            Key: s3Key
+          }).promise();
+        });
         
         let buffer = objectData.Body;
-        const nomeArquivoOriginal = path.basename(foto.nome);
-        const nomeArquivoNormalizado = normalizarNomeArquivo(nomeArquivoOriginal);
         const extensaoOriginal = path.extname(nomeArquivoOriginal).toLowerCase();
         
-        console.log(`[DEBUG] Indexando foto na coleção Rekognition:`);
-        console.log(`[DEBUG]   Nome original: ${nomeArquivoOriginal}`);
-        console.log(`[DEBUG]   Nome normalizado: ${nomeArquivoNormalizado}`);
-        console.log(`[DEBUG]   Extensão: ${extensaoOriginal}`);
-        
-        // Converter para JPEG se não for um formato nativo do Rekognition
+        // Etapa 2: Converter para JPEG se necessário
         const formatosNativos = ['.jpg', '.jpeg', '.png'];
         if (!formatosNativos.includes(extensaoOriginal)) {
-          console.log(`[DEBUG] Convertendo ${extensaoOriginal.toUpperCase()} para JPEG...`);
+          console.log(`[DEBUG] Convertendo ${extensaoOriginal.toUpperCase()} para JPEG: ${nomeArquivoOriginal}`);
           buffer = await sharp(buffer)
             .jpeg({ quality: 85 })
             .toBuffer();
-          console.log(`[DEBUG] Conversão concluída.`);
-        } else {
-          console.log(`[DEBUG] Formato ${extensaoOriginal.toUpperCase()} já é compatível com AWS Rekognition.`);
         }
         
-        // Obter metadados da imagem
+        // Etapa 3: Obter metadados da imagem
         const metadata = await sharp(buffer).metadata();
         
-        // Indexar na coleção Rekognition
-        const resultadoIndexacao = await rekognitionService.indexarFace(nomeColecao, buffer, nomeArquivoNormalizado);
+        // Etapa 4: Indexar na coleção Rekognition com retry
+        const resultadoIndexacao = await retryWithBackoff(async () => {
+          return await rekognitionService.indexarFace(nomeColecao, buffer, nomeArquivoNormalizado);
+        });
         
-        // Salvar no banco de dados
-        await FotoIndexada.marcarComoIndexada({
-          evento,
-          nomeArquivo: nomeArquivoOriginal,
-          nomeArquivoNormalizado,
-          caminhoCompleto: foto.caminho,
-          s3Key: s3Key,
-          colecaoRekognition: nomeColecao,
-          faceId: resultadoIndexacao.FaceRecords?.[0]?.Face?.FaceId,
-          tamanhoArquivo: objectData.ContentLength,
-          dimensoes: {
-            largura: metadata.width,
-            altura: metadata.height
-          }
+        // Etapa 5: Salvar no banco de dados com retry
+        await retryWithBackoff(async () => {
+          return await FotoIndexada.marcarComoIndexada({
+            evento,
+            nomeArquivo: nomeArquivoOriginal,
+            nomeArquivoNormalizado,
+            caminhoCompleto: foto.caminho,
+            s3Key: s3Key,
+            colecaoRekognition: nomeColecao,
+            faceId: resultadoIndexacao.FaceRecords?.[0]?.Face?.FaceId,
+            tamanhoArquivo: objectData.ContentLength,
+            dimensoes: {
+              largura: metadata.width,
+              altura: metadata.height
+            }
+          });
         });
         
         indexadas++;
+        console.log(`[DEBUG] ✅ [${index + 1}/${fotosNaoIndexadas.length}] Sucesso: ${nomeArquivoOriginal}`);
+        return { sucesso: true, foto: nomeArquivoOriginal };
         
-        // Atualizar progresso com sucesso
-        const progressoSucesso = progressoIndexacao.get(evento);
-        progressoSucesso.indexadas = indexadas;
-        progressoIndexacao.set(evento, progressoSucesso);
-        
-        console.log(`[DEBUG] [${i + 1}/${fotosNaoIndexadas.length}] Foto indexada e salva no DB: ${nomeArquivoNormalizado}`);
       } catch (err) {
+        erros++;
+        console.error(`[ERRO] ❌ [${index + 1}/${fotosNaoIndexadas.length}] Falha definitiva: ${nomeArquivoOriginal} - ${err.message}`);
+        
         // Salvar erro no banco de dados
         try {
-          const nomeArquivoOriginal = path.basename(foto.nome);
-          const nomeArquivoNormalizado = normalizarNomeArquivo(nomeArquivoOriginal);
           await FotoIndexada.marcarComErro(evento, nomeArquivoNormalizado, err.message);
         } catch (dbErr) {
           console.error(`[ERRO] Falha ao salvar erro no banco: ${dbErr.message}`);
         }
         
-        // Atualizar progresso com erro
-        const progressoErro = progressoIndexacao.get(evento);
-        progressoErro.erros++;
-        progressoIndexacao.set(evento, progressoErro);
+        return { sucesso: false, foto: nomeArquivoOriginal, erro: err.message };
+      } finally {
+        processadas++;
         
-        console.error(`[ERRO] [${i + 1}/${fotosNaoIndexadas.length}] Erro ao indexar foto: ${foto.nome} | Motivo: ${err.message}`);
+        // Atualizar progresso
+        const progressoAtual = progressoIndexacao.get(evento);
+        if (progressoAtual) {
+          progressoAtual.processadas = processadas;
+          progressoAtual.indexadas = indexadas;
+          progressoAtual.erros = erros;
+          progressoAtual.fotoAtual = `Processando em paralelo: ${processadas}/${fotosNaoIndexadas.length} (${indexadas} indexadas, ${erros} erros)`;
+          progressoIndexacao.set(evento, progressoAtual);
+        }
       }
-    }
+    };
+    
+    // Processamento em lotes com controle de concorrência
+    const processarEmLotes = async () => {
+      for (let i = 0; i < fotosNaoIndexadas.length; i += BATCH_SIZE) {
+        const lote = fotosNaoIndexadas.slice(i, i + BATCH_SIZE);
+        console.log(`[DEBUG] 📦 Processando lote ${Math.floor(i / BATCH_SIZE) + 1}: ${lote.length} fotos (${i + 1}-${Math.min(i + BATCH_SIZE, fotosNaoIndexadas.length)})`);
+        
+        // Processar lote com controle de concorrência
+        const promessasLote = lote.map((foto, loteIndex) => 
+          processarFoto(foto, i + loteIndex)
+        );
+        
+        // Executar com limite de concorrência
+        const resultados = [];
+        for (let j = 0; j < promessasLote.length; j += MAX_CONCURRENT) {
+          const chunk = promessasLote.slice(j, j + MAX_CONCURRENT);
+          const resultadosChunk = await Promise.allSettled(chunk);
+          resultados.push(...resultadosChunk);
+        }
+        
+        // Log do resultado do lote
+        const sucessos = resultados.filter(r => r.status === 'fulfilled' && r.value.sucesso).length;
+        const falhas = resultados.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.sucesso)).length;
+        console.log(`[DEBUG] ✅ Lote concluído: ${sucessos} sucessos, ${falhas} falhas`);
+        
+        // Pequena pausa entre lotes para não sobrecarregar
+        if (i + BATCH_SIZE < fotosNaoIndexadas.length) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+    };
+    
+    // Executar processamento paralelo
+    await processarEmLotes();
 
     console.log(`[DEBUG] Indexação finalizada. Total indexadas: ${indexadas} de ${fotosNaoIndexadas.length}`);
     

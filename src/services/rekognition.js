@@ -1,10 +1,21 @@
 const AWS = require('aws-sdk');
 
-// Configuração do AWS SDK (ajustar conforme necessário)
+// Configuração otimizada do AWS SDK para processamento paralelo
 AWS.config.update({
   region: process.env.AWS_REGION || 'us-east-1',
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  maxRetries: 5,
+  retryDelayOptions: {
+    customBackoff: function(retryCount) {
+      return Math.pow(2, retryCount) * 200; // Backoff exponencial para Rekognition
+    }
+  },
+  httpOptions: {
+    timeout: 60000, // 60 segundos para indexação de faces
+    connectTimeout: 15000, // 15 segundos para conectar
+    maxSockets: 20 // Limite para Rekognition (mais conservador)
+  }
 });
 
 const rekognition = new AWS.Rekognition();

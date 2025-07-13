@@ -7,10 +7,16 @@ const s3 = new AWS.S3({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   signatureVersion: 'v4',
-  maxRetries: 3,
+  maxRetries: 5, // Aumentado para indexação paralela
+  retryDelayOptions: {
+    customBackoff: function(retryCount) {
+      return Math.pow(2, retryCount) * 100; // Backoff exponencial
+    }
+  },
   httpOptions: {
-    timeout: 10000, // 10 segundos
-    connectTimeout: 5000 // 5 segundos
+    timeout: 30000, // 30 segundos para downloads grandes
+    connectTimeout: 10000, // 10 segundos para conectar
+    maxSockets: 50 // Permite até 50 conexões simultâneas
   }
 });
 
