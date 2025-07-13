@@ -5,7 +5,7 @@ const Evento = require('../models/evento');
 const Usuario = require('../models/usuario');
 const Pedido = require('../models/pedido');
 const FotoIndexada = require('../models/fotoIndexada');
-const { listarEventos, criarPastaNoS3 } = require('../services/minio');
+const { listarEventos, criarPastaNoS3, invalidarCacheEvento } = require('../services/minio');
 const TabelaPreco = require('../models/tabelaPreco');
 const { clearAllCache } = require('../services/cache');
 const { preCarregarDadosPopulares } = require('../services/minio');
@@ -1054,6 +1054,10 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
 
     console.log(`[DEBUG] Indexação finalizada. Total indexadas: ${indexadas} de ${fotosNaoIndexadas.length}`);
     
+    // Invalidar cache do evento para refletir novos dados
+    console.log(`[DEBUG] Invalidando cache do evento após indexação...`);
+    await invalidarCacheEvento(evento);
+    
     // Obter estatísticas finais do banco de dados
     const estatisticasFinais = await FotoIndexada.estatisticasEvento(evento);
     
@@ -1194,6 +1198,29 @@ router.get('/eventos/:evento/diagnostico-indexacao', authMiddleware, async (req,
     console.error('Erro no diagnóstico:', error);
     res.status(500).json({ 
       erro: 'Erro no diagnóstico', 
+      detalhes: error.message 
+    });
+  }
+});
+
+// Rota para invalidar cache de um evento específico
+router.post('/eventos/:evento/invalidar-cache', authMiddleware, async (req, res) => {
+  try {
+    const { evento } = req.params;
+    
+    console.log(`[DEBUG] Invalidando cache para evento: ${evento}`);
+    
+    await invalidarCacheEvento(evento);
+    
+    res.json({ 
+      sucesso: true, 
+      message: `Cache invalidado para evento: ${evento}` 
+    });
+    
+  } catch (error) {
+    console.error('Erro ao invalidar cache:', error);
+    res.status(500).json({ 
+      erro: 'Erro ao invalidar cache', 
       detalhes: error.message 
     });
   }

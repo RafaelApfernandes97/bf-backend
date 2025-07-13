@@ -405,10 +405,91 @@ async function listarFotosPorCaminho(caminho) {
   return fotos;
 }
 
+// Função para invalidar cache de um evento específico
+async function invalidarCacheEvento(evento) {
+  try {
+    console.log(`🧹 Invalidando cache do evento: ${evento}`);
+    
+    // Lista todos os possíveis caches para este evento
+    const cachesToClear = [];
+    
+    // Cache de coreografias do evento principal
+    cachesToClear.push(generateCacheKey('evento', evento, 'coreografias'));
+    
+    // Verifica se é evento multi-dia e limpa cache dos dias também
+    const data = await s3.listObjectsV2({
+      Bucket: bucket,
+      Prefix: `${bucketPrefix}/${evento}/`,
+      Delimiter: '/',
+    }).promise();
+    
+    const prefixes = (data.CommonPrefixes || [])
+      .map(prefix => prefix.Prefix.replace(`${bucketPrefix}/${evento}/`, '').replace('/', ''));
+    
+    const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
+    
+    if (dias.length > 0) {
+      // Evento multi-dia - invalidar cache de cada dia
+      for (const dia of dias) {
+        cachesToClear.push(generateCacheKey('evento', evento, 'dia', dia, 'coreografias'));
+        
+        // Invalidar cache de fotos de cada coreografia do dia
+        const coreografiasData = await s3.listObjectsV2({
+          Bucket: bucket,
+          Prefix: `${bucketPrefix}/${evento}/${dia}/`,
+          Delimiter: '/',
+        }).promise();
+        
+        (coreografiasData.CommonPrefixes || []).forEach(p => {
+          const nomeCoreo = p.Prefix.replace(`${bucketPrefix}/${evento}/${dia}/`, '').replace('/', '');
+          cachesToClear.push(generateCacheKey('evento', evento, 'dia', dia, 'coreografia', nomeCoreo, 'fotos'));
+          cachesToClear.push(generateCacheKey('caminho', `${evento}/${dia}/${nomeCoreo}`, 'fotos'));
+        });
+      }
+    } else {
+      // Evento de um dia - invalidar cache de cada coreografia
+      const coreografiasData = await s3.listObjectsV2({
+        Bucket: bucket,
+        Prefix: `${bucketPrefix}/${evento}/`,
+        Delimiter: '/',
+      }).promise();
+      
+      (coreografiasData.CommonPrefixes || []).forEach(p => {
+        const nomeCoreo = p.Prefix.replace(`${bucketPrefix}/${evento}/`, '').replace('/', '');
+        cachesToClear.push(generateCacheKey('evento', evento, 'coreografia', nomeCoreo, 'fotos'));
+        cachesToClear.push(generateCacheKey('caminho', `${evento}/${nomeCoreo}`, 'fotos'));
+      });
+    }
+    
+    // Invalidar cache de contagem de fotos
+    cachesToClear.forEach(cacheKey => {
+      if (cacheKey.includes('fotos_count:')) {
+        cachesToClear.push(cacheKey);
+      }
+    });
+    
+    // Importar clearCache function
+    const { clearCache } = require('./cache');
+    
+    // Limpar todos os caches identificados
+    for (const cacheKey of cachesToClear) {
+      await clearCache(cacheKey);
+    }
+    
+    console.log(`✅ Cache invalidado para evento ${evento}: ${cachesToClear.length} entradas removidas`);
+    
+  } catch (error) {
+    console.error(`❌ Erro ao invalidar cache do evento ${evento}:`, error);
+  }
+}
+
 // Função para aquecer cache de um evento específico
 async function aquecerCacheEvento(evento) {
   try {
     console.log(`🔥 Aquecendo cache do evento: ${evento}`);
+    
+    // Primeiro invalida o cache existente para garantir dados frescos
+    await invalidarCacheEvento(evento);
     
     // Verifica estrutura do evento
     const data = await s3.listObjectsV2({
@@ -469,6 +550,7 @@ module.exports = {
   listarFotosPorCaminho,
   preCarregarDadosPopulares,
   aquecerCacheEvento,
+  invalidarCacheEvento,
   contarFotosRecursivo,
   criarPastaNoS3
 };
