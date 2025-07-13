@@ -1,22 +1,29 @@
 const AWS = require('aws-sdk');
 
-// Configuração otimizada do AWS SDK para processamento paralelo
+// Configuração TURBO para Rekognition com processamento massivo
+const isTurboMode = process.env.INDEXACAO_TURBO_MODE === 'true';
+
 AWS.config.update({
   region: process.env.AWS_REGION || 'us-east-1',
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  maxRetries: 5,
+  maxRetries: isTurboMode ? 3 : 5,
   retryDelayOptions: {
     customBackoff: function(retryCount) {
-      return Math.pow(2, retryCount) * 200; // Backoff exponencial para Rekognition
+      const baseDelay = isTurboMode ? 100 : 200;
+      return Math.pow(2, retryCount) * baseDelay;
     }
   },
   httpOptions: {
-    timeout: 60000, // 60 segundos para indexação de faces
-    connectTimeout: 15000, // 15 segundos para conectar
-    maxSockets: 20 // Limite para Rekognition (mais conservador)
+    timeout: isTurboMode ? 120000 : 60000, // 2 minutos no modo turbo
+    connectTimeout: isTurboMode ? 20000 : 15000,
+    maxSockets: isTurboMode ? 200 : 20, // 200 conexões no modo turbo
+    agent: false // Desabilita pooling para máxima performance
   }
 });
+
+// Aumentar limite de listeners para Rekognition
+require('events').EventEmitter.defaultMaxListeners = 1000;
 
 const rekognition = new AWS.Rekognition();
 

@@ -2,23 +2,32 @@ const AWS = require('aws-sdk');
 const { getFromCache, setCache, generateCacheKey, clearAllCache } = require('./cache');
 require('dotenv').config();
 
+// Configurações TURBO para processamento massivo
+const isTurboMode = process.env.INDEXACAO_TURBO_MODE === 'true';
+const maxSockets = isTurboMode ? 500 : 50; // 500 conexões no modo turbo
+
 const s3 = new AWS.S3({
   region: process.env.AWS_REGION || 'us-east-1',
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   signatureVersion: 'v4',
-  maxRetries: 5, // Aumentado para indexação paralela
+  maxRetries: isTurboMode ? 3 : 5,
   retryDelayOptions: {
     customBackoff: function(retryCount) {
-      return Math.pow(2, retryCount) * 100; // Backoff exponencial
+      const baseDelay = isTurboMode ? 50 : 100; // Retry mais rápido no modo turbo
+      return Math.pow(2, retryCount) * baseDelay;
     }
   },
   httpOptions: {
-    timeout: 30000, // 30 segundos para downloads grandes
-    connectTimeout: 10000, // 10 segundos para conectar
-    maxSockets: 50 // Permite até 50 conexões simultâneas
+    timeout: isTurboMode ? 60000 : 30000, // Timeout maior para modo turbo
+    connectTimeout: isTurboMode ? 15000 : 10000,
+    maxSockets: maxSockets, // Muitas conexões simultâneas
+    agent: false // Desabilita agent pooling para melhor performance
   }
 });
+
+// Aumentar limite de listeners para evitar warnings
+require('events').EventEmitter.defaultMaxListeners = 1000;
 
 const bucket = process.env.S3_BUCKET;
 const bucketPrefix = process.env.S3_BUCKET_PREFIX || 'balletemfoco'; // Prefixo dentro do bucket

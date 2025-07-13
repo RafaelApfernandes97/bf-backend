@@ -5,6 +5,22 @@ const { preCarregarDadosPopulares } = require('./services/minio');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
+// Otimizações para processamento massivo
+if (process.env.INDEXACAO_TURBO_MODE === 'true') {
+  // Aumentar limites do Node.js para modo turbo
+  process.setMaxListeners(0); // Remove limite de listeners
+  require('events').EventEmitter.defaultMaxListeners = 0;
+  
+  // Otimizar garbage collector
+  if (global.gc) {
+    setInterval(() => {
+      global.gc();
+    }, 30000); // GC a cada 30 segundos
+  }
+  
+  console.log('🚀 MODO TURBO ATIVADO - Configurações extremas de performance');
+}
+
 const app = express();
 
 // Middlewares

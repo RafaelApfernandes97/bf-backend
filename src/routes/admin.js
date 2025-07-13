@@ -885,13 +885,23 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
       return;
     }
     
-    // Configurações de processamento paralelo
-    const MAX_CONCURRENT = parseInt(process.env.INDEXACAO_CONCURRENT || '8'); // Máximo 8 fotos simultâneas
-    const BATCH_SIZE = parseInt(process.env.INDEXACAO_BATCH_SIZE || '20'); // Lotes de 20 fotos
-    const RETRY_ATTEMPTS = parseInt(process.env.INDEXACAO_RETRY_ATTEMPTS || '3'); // Tentativas de retry
-    const RETRY_DELAY = parseInt(process.env.INDEXACAO_RETRY_DELAY || '1000'); // Delay entre retries
+    // Configurações de processamento massivo TURBO
+    const MAX_CONCURRENT = parseInt(process.env.INDEXACAO_CONCURRENT || '200'); // 200 fotos simultâneas
+    const BATCH_SIZE = parseInt(process.env.INDEXACAO_BATCH_SIZE || '500'); // Lotes de 500 fotos
+    const RETRY_ATTEMPTS = parseInt(process.env.INDEXACAO_RETRY_ATTEMPTS || '2'); // Menos retries para velocidade
+    const RETRY_DELAY = parseInt(process.env.INDEXACAO_RETRY_DELAY || '500'); // Delay menor
+    const TURBO_MODE = process.env.INDEXACAO_TURBO_MODE === 'true';
     
-    console.log(`[DEBUG] Iniciando indexação PARALELA: ${MAX_CONCURRENT} concurrent, lotes de ${BATCH_SIZE}`);
+    console.log(`[DEBUG] Iniciando indexação ${TURBO_MODE ? 'TURBO' : 'PARALELA'}: ${MAX_CONCURRENT} concurrent, lotes de ${BATCH_SIZE}`);
+    
+    // Métricas de performance
+    const inicioTempo = Date.now();
+    const metricas = {
+      inicioTempo,
+      ultimoLog: inicioTempo,
+      totalBytes: 0,
+      fotosProcessadasUltimoLog: 0
+    };
     
     // Contadores compartilhados (thread-safe com Map)
     let processadas = 0;
@@ -946,17 +956,26 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
         let buffer = objectData.Body;
         const extensaoOriginal = path.extname(nomeArquivoOriginal).toLowerCase();
         
-        // Etapa 2: Converter para JPEG se necessário
+        // Etapa 2 & 3: Conversão e metadados em paralelo (TURBO)
         const formatosNativos = ['.jpg', '.jpeg', '.png'];
-        if (!formatosNativos.includes(extensaoOriginal)) {
-          console.log(`[DEBUG] Convertendo ${extensaoOriginal.toUpperCase()} para JPEG: ${nomeArquivoOriginal}`);
-          buffer = await sharp(buffer)
-            .jpeg({ quality: 85 })
-            .toBuffer();
-        }
+        let metadata;
         
-        // Etapa 3: Obter metadados da imagem
-        const metadata = await sharp(buffer).metadata();
+        if (!formatosNativos.includes(extensaoOriginal)) {
+          if (TURBO_MODE) {
+            // No modo turbo, fazer conversão e metadados em paralelo
+            const [bufferConvertido, metadataOriginal] = await Promise.all([
+              sharp(buffer).jpeg({ quality: 80 }).toBuffer(), // Qualidade menor para velocidade
+              sharp(buffer).metadata()
+            ]);
+            buffer = bufferConvertido;
+            metadata = { width: metadataOriginal.width, height: metadataOriginal.height };
+          } else {
+            buffer = await sharp(buffer).jpeg({ quality: 85 }).toBuffer();
+            metadata = await sharp(buffer).metadata();
+          }
+        } else {
+          metadata = await sharp(buffer).metadata();
+        }
         
         // Etapa 4: Indexar na coleção Rekognition com retry
         const resultadoIndexacao = await retryWithBackoff(async () => {
@@ -988,7 +1007,23 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
         console.log(`[DEBUG] ✅ Foto salva no banco com ID: ${fotoSalva._id}`);
         
         indexadas++;
-        console.log(`[DEBUG] ✅ [${index + 1}/${fotosNaoIndexadas.length}] Sucesso: ${nomeArquivoOriginal}`);
+        metricas.totalBytes += objectData.ContentLength || 0;
+        
+        // Log de performance a cada 50 fotos no modo turbo
+        if (TURBO_MODE && processadas % 50 === 0) {
+          const agora = Date.now();
+          const tempoDecorrido = agora - metricas.inicioTempo;
+          const fotosDesdeUltimoLog = processadas - metricas.fotosProcessadasUltimoLog;
+          const tempoUltimoLog = agora - metricas.ultimoLog;
+          const velocidade = fotosDesdeUltimoLog / (tempoUltimoLog / 1000);
+          const mbProcessados = (metricas.totalBytes / 1024 / 1024).toFixed(1);
+          
+          console.log(`[TURBO] 🚀 ${processadas}/${fotosNaoIndexadas.length} | ${indexadas} indexadas | ${velocidade.toFixed(1)} fotos/s | ${mbProcessados}MB`);
+          
+          metricas.ultimoLog = agora;
+          metricas.fotosProcessadasUltimoLog = processadas;
+        }
+        
         return { sucesso: true, foto: nomeArquivoOriginal };
         
       } catch (err) {
@@ -1018,33 +1053,61 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
       }
     };
     
-    // Processamento em lotes com controle de concorrência
+    // Processamento massivo TURBO - sem limitações artificiais
     const processarEmLotes = async () => {
-      for (let i = 0; i < fotosNaoIndexadas.length; i += BATCH_SIZE) {
-        const lote = fotosNaoIndexadas.slice(i, i + BATCH_SIZE);
-        console.log(`[DEBUG] 📦 Processando lote ${Math.floor(i / BATCH_SIZE) + 1}: ${lote.length} fotos (${i + 1}-${Math.min(i + BATCH_SIZE, fotosNaoIndexadas.length)})`);
+      if (TURBO_MODE && fotosNaoIndexadas.length <= MAX_CONCURRENT) {
+        // MODO ULTRA-TURBO: Processar tudo simultaneamente
+        console.log(`[DEBUG] 🚀 MODO ULTRA-TURBO: Processando ${fotosNaoIndexadas.length} fotos SIMULTANEAMENTE!`);
         
-        // Processar lote com controle de concorrência
-        const promessasLote = lote.map((foto, loteIndex) => 
-          processarFoto(foto, i + loteIndex)
+        const promessasTodasFotos = fotosNaoIndexadas.map((foto, index) => 
+          processarFoto(foto, index)
         );
         
-        // Executar com limite de concorrência
-        const resultados = [];
-        for (let j = 0; j < promessasLote.length; j += MAX_CONCURRENT) {
-          const chunk = promessasLote.slice(j, j + MAX_CONCURRENT);
-          const resultadosChunk = await Promise.allSettled(chunk);
-          resultados.push(...resultadosChunk);
-        }
+        const resultados = await Promise.allSettled(promessasTodasFotos);
         
-        // Log do resultado do lote
-        const sucessos = resultados.filter(r => r.status === 'fulfilled' && r.value.sucesso).length;
-        const falhas = resultados.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.sucesso)).length;
-        console.log(`[DEBUG] ✅ Lote concluído: ${sucessos} sucessos, ${falhas} falhas`);
+        const sucessos = resultados.filter(r => r.status === 'fulfilled' && r.value?.sucesso).length;
+        const falhas = resultados.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value?.sucesso)).length;
+        console.log(`[DEBUG] 🎯 TURBO CONCLUÍDO: ${sucessos} sucessos, ${falhas} falhas`);
         
-        // Pequena pausa entre lotes para não sobrecarregar
-        if (i + BATCH_SIZE < fotosNaoIndexadas.length) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+      } else {
+        // MODO TURBO com lotes massivos
+        for (let i = 0; i < fotosNaoIndexadas.length; i += BATCH_SIZE) {
+          const lote = fotosNaoIndexadas.slice(i, i + BATCH_SIZE);
+          const loteNum = Math.floor(i / BATCH_SIZE) + 1;
+          const totalLotes = Math.ceil(fotosNaoIndexadas.length / BATCH_SIZE);
+          
+          console.log(`[DEBUG] 🚀 Processando MEGA-LOTE ${loteNum}/${totalLotes}: ${lote.length} fotos (${i + 1}-${Math.min(i + BATCH_SIZE, fotosNaoIndexadas.length)})`);
+          
+          // Processar lote massivo com controle de concorrência
+          const promessasLote = lote.map((foto, loteIndex) => 
+            processarFoto(foto, i + loteIndex)
+          );
+          
+          // Dividir em chunks apenas se necessário
+          const resultados = [];
+          if (promessasLote.length <= MAX_CONCURRENT) {
+            // Executar tudo simultaneamente se cabe no limite
+            const resultadosLote = await Promise.allSettled(promessasLote);
+            resultados.push(...resultadosLote);
+          } else {
+            // Dividir em chunks do tamanho da concorrência
+            for (let j = 0; j < promessasLote.length; j += MAX_CONCURRENT) {
+              const chunk = promessasLote.slice(j, j + MAX_CONCURRENT);
+              const resultadosChunk = await Promise.allSettled(chunk);
+              resultados.push(...resultadosChunk);
+            }
+          }
+          
+          // Log do resultado do mega-lote
+          const sucessos = resultados.filter(r => r.status === 'fulfilled' && r.value?.sucesso).length;
+          const falhas = resultados.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value?.sucesso)).length;
+          console.log(`[DEBUG] ✅ MEGA-LOTE ${loteNum} concluído: ${sucessos} sucessos, ${falhas} falhas`);
+          
+          // Pausa mínima entre mega-lotes (só se não for o último)
+          if (i + BATCH_SIZE < fotosNaoIndexadas.length) {
+            const pausaMs = TURBO_MODE ? 50 : 100;
+            await new Promise(resolve => setTimeout(resolve, pausaMs));
+          }
         }
       }
     };
@@ -1052,7 +1115,16 @@ router.post('/eventos/:evento/indexar-fotos', authMiddleware, async (req, res) =
     // Executar processamento paralelo
     await processarEmLotes();
 
-    console.log(`[DEBUG] Indexação finalizada. Total indexadas: ${indexadas} de ${fotosNaoIndexadas.length}`);
+    // Métricas finais de performance
+    const tempoTotal = Date.now() - metricas.inicioTempo;
+    const velocidadeMedia = fotosNaoIndexadas.length / (tempoTotal / 1000);
+    const mbTotalProcessados = (metricas.totalBytes / 1024 / 1024).toFixed(1);
+    
+    console.log(`[DEBUG] 🎯 INDEXAÇÃO FINALIZADA!`);
+    console.log(`[DEBUG] ⚡ Total: ${indexadas} indexadas de ${fotosNaoIndexadas.length} fotos`);
+    console.log(`[DEBUG] ⏱️  Tempo: ${(tempoTotal / 1000).toFixed(1)}s | Velocidade: ${velocidadeMedia.toFixed(1)} fotos/s`);
+    console.log(`[DEBUG] 💾 Dados: ${mbTotalProcessados}MB processados`);
+    console.log(`[DEBUG] 🚀 Modo: ${TURBO_MODE ? 'TURBO' : 'NORMAL'} | Concorrência: ${MAX_CONCURRENT}`);
     
     // Invalidar cache do evento para refletir novos dados
     console.log(`[DEBUG] Invalidando cache do evento após indexação...`);
