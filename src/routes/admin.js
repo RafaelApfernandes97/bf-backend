@@ -26,20 +26,33 @@ const JWT_SECRET = process.env.JWT_SECRET || 'segredo123';
 // Middleware para proteger rotas
 function authMiddleware(req, res, next) {
   console.log(`[DEBUG] AuthMiddleware - Rota: ${req.method} ${req.path}`);
-  const token = req.headers['authorization']?.split(' ')[1];
+  const authHeader = req.headers['authorization'];
+  console.log(`[DEBUG] AuthMiddleware - Authorization header: ${authHeader ? authHeader.substring(0, 20) + '...' : 'undefined'}`);
+  
+  const token = authHeader?.split(' ')[1];
   console.log(`[DEBUG] AuthMiddleware - Token presente: ${!!token}`);
   console.log(`[DEBUG] AuthMiddleware - JWT_SECRET definido: ${!!JWT_SECRET}`);
+  
   if (!token) {
     console.log(`[DEBUG] AuthMiddleware - Token não fornecido`);
     return res.status(401).json({ error: 'Token não fornecido' });
   }
+  
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) {
       console.log(`[DEBUG] AuthMiddleware - Token inválido:`, err.message);
-      console.log(`[DEBUG] AuthMiddleware - Erro detalhado:`, err);
-      return res.status(401).json({ error: 'Token inválido', details: err.message });
+      console.log(`[DEBUG] AuthMiddleware - Tipo do erro:`, err.name);
+      if (err.name === 'TokenExpiredError') {
+        console.log(`[DEBUG] AuthMiddleware - Token expirado em:`, err.expiredAt);
+      }
+      return res.status(401).json({ 
+        error: 'Token inválido', 
+        details: err.message,
+        type: err.name
+      });
     }
     console.log(`[DEBUG] AuthMiddleware - Token válido, usuário: ${decoded.username}`);
+    console.log(`[DEBUG] AuthMiddleware - Token expira em:`, new Date(decoded.exp * 1000));
     req.user = decoded;
     next();
   });
@@ -60,12 +73,21 @@ router.post('/register', async (req, res) => {
 
 // Login
 router.post('/login', async (req, res) => {
+  console.log(`[DEBUG] Login attempt - username: ${req.body.username}`);
   const { username, password } = req.body;
   const user = await Usuario.findOne({ username });
-  if (!user) return res.status(401).json({ error: 'Usuário ou senha inválidos' });
+  if (!user) {
+    console.log(`[DEBUG] Login failed - user not found: ${username}`);
+    return res.status(401).json({ error: 'Usuário ou senha inválidos' });
+  }
   const ok = await bcrypt.compare(password, user.password);
-  if (!ok) return res.status(401).json({ error: 'Usuário ou senha inválidos' });
-  const token = jwt.sign({ id: user._id, username: user.username }, JWT_SECRET, { expiresIn: '2h' });
+  if (!ok) {
+    console.log(`[DEBUG] Login failed - wrong password for user: ${username}`);
+    return res.status(401).json({ error: 'Usuário ou senha inválidos' });
+  }
+  const token = jwt.sign({ id: user._id, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
+  console.log(`[DEBUG] Login successful - user: ${username}, token generated`);
+  console.log(`[DEBUG] JWT_SECRET being used: ${JWT_SECRET.substring(0, 10)}...`);
   res.json({ token });
 });
 
