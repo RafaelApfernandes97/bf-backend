@@ -197,7 +197,10 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
       secaoBanners += 'Produtos:\n';
       secaoBanners += banners.map(b => {
         const preco = Number(b.preco) || 0;
-        console.log(`[WhatsApp] Banner ${b.nome}: preço=${b.preco}, convertido=${preco}`);
+        console.log(`[WhatsApp] Banner ${b.nome}: preço=${b.preco}, convertido=${preco}, categoria=${b.categoria}`);
+        
+        // O nome já deve vir formatado como "Vale Coreografia: Nome da Coreografia" ou "Vídeo: Nome da Coreografia"
+        // Vamos usar o nome como está, pois já contém a informação da coreografia
         return `${b.nome} - R$ ${preco.toFixed(2).replace('.', ',')}`;
       }).join('\n');
       secaoBanners += '\n\n';
