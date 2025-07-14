@@ -509,9 +509,14 @@ router.get('/estatisticas', authMiddleware, async (req, res) => {
           porStatus: [
             { $group: { _id: '$status', count: { $sum: 1 }, total: { $sum: '$valorTotal' } } }
           ],
-          // Pedidos por período
+          // Pedidos por período (excluindo cancelados)
           porPeriodo: [
-            { $match: { dataCriacao: { $gte: dataInicio } } },
+            { 
+              $match: { 
+                dataCriacao: { $gte: dataInicio },
+                status: { $ne: 'cancelado' }
+              } 
+            },
             {
               $group: {
                 _id: { $dateToString: { format: '%Y-%m-%d', date: '$dataCriacao' } },
@@ -521,9 +526,14 @@ router.get('/estatisticas', authMiddleware, async (req, res) => {
             },
             { $sort: { _id: 1 } }
           ],
-          // Pedidos por evento
+          // Pedidos por evento (excluindo cancelados)
           porEvento: [
-            { $match: { dataCriacao: { $gte: dataInicio } } },
+            { 
+              $match: { 
+                dataCriacao: { $gte: dataInicio },
+                status: { $ne: 'cancelado' }
+              } 
+            },
             {
               $group: {
                 _id: '$evento',
@@ -540,7 +550,12 @@ router.get('/estatisticas', authMiddleware, async (req, res) => {
               $group: {
                 _id: null,
                 totalPedidos: { $sum: 1 },
-                totalReceita: { $sum: '$valorTotal' },
+                totalPedidosAtivos: { 
+                  $sum: { $cond: [{ $ne: ['$status', 'cancelado'] }, 1, 0] }
+                },
+                totalReceita: { 
+                  $sum: { $cond: [{ $ne: ['$status', 'cancelado'] }, '$valorTotal', 0] }
+                },
                 receitaPendente: {
                   $sum: { $cond: [{ $eq: ['$status', 'pendente'] }, '$valorTotal', 0] }
                 },
@@ -549,13 +564,24 @@ router.get('/estatisticas', authMiddleware, async (req, res) => {
                 },
                 receitaPaga: {
                   $sum: { $cond: [{ $eq: ['$status', 'pago'] }, '$valorTotal', 0] }
+                },
+                receitaEntregue: {
+                  $sum: { $cond: [{ $eq: ['$status', 'entregue'] }, '$valorTotal', 0] }
+                },
+                receitaCancelada: {
+                  $sum: { $cond: [{ $eq: ['$status', 'cancelado'] }, '$valorTotal', 0] }
                 }
               }
             }
           ],
-          // Estatísticas do período
+          // Estatísticas do período (excluindo cancelados)
           periodoStats: [
-            { $match: { dataCriacao: { $gte: dataInicio } } },
+            { 
+              $match: { 
+                dataCriacao: { $gte: dataInicio },
+                status: { $ne: 'cancelado' }
+              } 
+            },
             {
               $group: {
                 _id: null,
