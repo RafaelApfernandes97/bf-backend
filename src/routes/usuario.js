@@ -145,6 +145,8 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
     
     console.log('[WhatsApp] Fotos normais:', fotosNormais.length);
     console.log('[WhatsApp] Banners:', banners.length);
+    console.log('[WhatsApp] Dados detalhados dos banners:', JSON.stringify(banners, null, 2));
+    console.log('[WhatsApp] Dados detalhados das fotos normais:', JSON.stringify(fotosNormais.slice(0, 2), null, 2));
     
     // Gerar ID único do pedido
     const pedidoId = await Pedido.gerarPedidoId();
@@ -152,7 +154,11 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
     
     // Calcular valor total
     const valorFotosNormais = fotosNormais.length * valorUnitario;
-    const valorBanners = banners.reduce((acc, banner) => acc + (Number(banner.preco) || 0), 0);
+    const valorBanners = banners.reduce((acc, banner) => {
+      const preco = Number(banner.preco) || 0;
+      console.log(`[WhatsApp] Processando banner: ${banner.nome}, preço=${banner.preco}, convertido=${preco}`);
+      return acc + preco;
+    }, 0);
     const valorTotal = valorFotosNormais + valorBanners;
     
     console.log('[WhatsApp] Valor fotos normais:', valorFotosNormais);
@@ -189,7 +195,11 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
     let secaoBanners = '';
     if (banners.length > 0) {
       secaoBanners += 'Produtos:\n';
-      secaoBanners += banners.map(b => `${b.nome} - R$ ${(Number(b.preco) || 0).toFixed(2).replace('.', ',')}`).join('\n');
+      secaoBanners += banners.map(b => {
+        const preco = Number(b.preco) || 0;
+        console.log(`[WhatsApp] Banner ${b.nome}: preço=${b.preco}, convertido=${preco}`);
+        return `${b.nome} - R$ ${preco.toFixed(2).replace('.', ',')}`;
+      }).join('\n');
       secaoBanners += '\n\n';
     }
     
