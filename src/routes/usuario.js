@@ -139,12 +139,25 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
       endereco: `${user.rua}, ${user.numero} - ${user.bairro}, ${user.cidade} - ${user.estado}, CEP: ${user.cep}`
     });
     
+    // Separar banners de fotos normais
+    const banners = fotos.filter(item => item.tipo === 'banner');
+    const fotosNormais = fotos.filter(item => item.tipo !== 'banner');
+    
+    console.log('[WhatsApp] Fotos normais:', fotosNormais.length);
+    console.log('[WhatsApp] Banners:', banners.length);
+    
     // Gerar ID único do pedido
     const pedidoId = await Pedido.gerarPedidoId();
     console.log('[WhatsApp] ID do pedido gerado:', pedidoId);
     
     // Calcular valor total
-    const valorTotal = fotos.length * valorUnitario;
+    const valorFotosNormais = fotosNormais.length * valorUnitario;
+    const valorBanners = banners.reduce((acc, banner) => acc + (Number(banner.preco) || 0), 0);
+    const valorTotal = valorFotosNormais + valorBanners;
+    
+    console.log('[WhatsApp] Valor fotos normais:', valorFotosNormais);
+    console.log('[WhatsApp] Valor banners:', valorBanners);
+    console.log('[WhatsApp] Valor total:', valorTotal);
     
     // Criar pedido no banco de dados
     const novoPedido = new Pedido({
@@ -163,6 +176,32 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
     // Montar mensagem com ID do pedido
     // Inserir caractere invisível após o @ para evitar link no WhatsApp
     const emailTexto = user.email.replace('@', '@\u200B');
+    
+    // Construir seção de fotos
+    let secaoFotos = '';
+    if (fotosNormais.length > 0) {
+      secaoFotos += 'Fotos:\n';
+      secaoFotos += fotosNormais.map(f => `${f.nome}`).join('\n');
+      secaoFotos += '\n\n';
+    }
+    
+    // Construir seção de banners
+    let secaoBanners = '';
+    if (banners.length > 0) {
+      secaoBanners += 'Produtos:\n';
+      secaoBanners += banners.map(b => `${b.nome} - R$ ${(Number(b.preco) || 0).toFixed(2).replace('.', ',')}`).join('\n');
+      secaoBanners += '\n\n';
+    }
+    
+    // Construir resumo de valores
+    let resumoValores = '';
+    if (fotosNormais.length > 0) {
+      resumoValores += `Fotos (${fotosNormais.length}): R$ ${valorFotosNormais.toFixed(2).replace('.', ',')}\n`;
+    }
+    if (banners.length > 0) {
+      resumoValores += `Produtos (${banners.length}): R$ ${valorBanners.toFixed(2).replace('.', ',')}\n`;
+    }
+    
     const mensagem = `Seu pedido foi recebido aqui no Ballet em Foco! ✨
 
 
@@ -176,12 +215,7 @@ Telefone: ${user.telefone}
 CPF: ${user.cpfCnpj}
 Endereço: ${user.rua}, ${user.numero} - ${user.bairro}, ${user.cidade} - ${user.estado}, CEP: ${user.cep}
 
-Fotos:
-${fotos.map(f => `${f.nome}`).join('\n')}
-
-Imagens Selecionadas: ${fotos.length}
-Valor Unitário: R$ ${valorUnitario.toFixed(2).replace('.', ',')}
-
+${secaoFotos}${secaoBanners}${resumoValores}
 Valor Total: R$ ${valorTotal.toFixed(2).replace('.', ',')}`;
     console.log('[WhatsApp] Mensagem montada:', mensagem);
     
