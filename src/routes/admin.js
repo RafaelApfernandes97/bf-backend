@@ -171,18 +171,31 @@ router.post('/eventos', authMiddleware, async (req, res) => {
 });
 
 router.put('/eventos/:id', authMiddleware, async (req, res) => {
-  const { nome, data, local, tabelaPrecoId, valorFixo, exibirBannerValeCoreografia, exibirBannerVideo } = req.body;
-  const evento = await Evento.findByIdAndUpdate(req.params.id, { 
-    nome, 
-    data, 
-    local, 
-    tabelaPrecoId, 
-    valorFixo, 
-    exibirBannerValeCoreografia, 
-    exibirBannerVideo 
-  }, { new: true });
-  await evento.populate('tabelaPrecoId');
-  res.json(evento);
+  try {
+    const { nome, data, local, tabelaPrecoId, valorFixo, exibirBannerValeCoreografia, exibirBannerVideo } = req.body;
+    const eventoId = req.params.id;
+    
+    const evento = await Evento.findByIdAndUpdate(eventoId, { 
+      nome, 
+      data, 
+      local, 
+      tabelaPrecoId, 
+      valorFixo, 
+      exibirBannerValeCoreografia, 
+      exibirBannerVideo 
+    }, { new: true });
+    
+    if (!evento) {
+      return res.status(404).json({ error: 'Evento não encontrado' });
+    }
+    
+    await evento.populate('tabelaPrecoId');
+    
+    res.json(evento);
+  } catch (error) {
+    console.error('Erro ao editar evento:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
 });
 
 router.delete('/eventos/:id', authMiddleware, async (req, res) => {
