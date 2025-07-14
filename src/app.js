@@ -26,6 +26,8 @@ const app = express();
 // Middlewares
 const corsOptions = {
   origin: function (origin, callback) {
+    console.log(`[CORS] Verificando origem: ${origin}`);
+    
     // Lista de origens permitidas
     const allowedOrigins = [
       'http://localhost:3000',
@@ -40,27 +42,55 @@ const corsOptions = {
       'https://fotos.rfsolutionbr.com.br'
     ];
 
-    // Em desenvolvimento ou se NODE_ENV não está definido, aceita localhost
+    // Permitir requisições sem origem (Postman, apps móveis, etc.)
+    if (!origin) {
+      console.log(`[CORS] Permitindo requisição sem origem`);
+      return callback(null, true);
+    }
+
+    // Em desenvolvimento, aceita localhost e 127.0.0.1
     const isDev = !process.env.NODE_ENV || process.env.NODE_ENV === 'development';
-    const isLocalhost = origin && (origin.includes('localhost') || origin.includes('127.0.0.1'));
+    const isLocalhost = origin.includes('localhost') || origin.includes('127.0.0.1');
     
     if (isDev && isLocalhost) {
-      callback(null, true);
-      return;
+      console.log(`[CORS] Modo desenvolvimento - permitindo origem localhost: ${origin}`);
+      return callback(null, true);
     }
 
     // Verifica se a origem está na lista permitida
-    const ok = !origin || allowedOrigins.some(o => origin.startsWith(o));
-    if (ok) {
+    const isAllowed = allowedOrigins.some(allowedOrigin => 
+      origin === allowedOrigin || origin.startsWith(allowedOrigin)
+    );
+    
+    if (isAllowed) {
+      console.log(`[CORS] Origem permitida: ${origin}`);
       callback(null, true);
     } else {
-      console.warn('[CORS] Origem não permitida:', origin);
-      callback(null, true); // Temporariamente permitir todas as origens para debug
+      console.warn(`[CORS] Origem NÃO permitida: ${origin}`);
+      // Em desenvolvimento, vamos permitir temporariamente para debug
+      if (isDev) {
+        console.log(`[CORS] Modo desenvolvimento - permitindo origem para debug: ${origin}`);
+        callback(null, true);
+      } else {
+        callback(new Error('Não permitido pelo CORS'));
+      }
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'Access-Control-Request-Method',
+    'Access-Control-Request-Headers'
+  ],
+  exposedHeaders: ['Content-Length', 'X-Foo', 'X-Bar'],
+  optionsSuccessStatus: 200, // some legacy browsers (IE11, various SmartTVs) choke on 204
+  preflightContinue: false,
+  maxAge: 86400 // 24 horas
 };
 
 app.use(cors(corsOptions));
