@@ -76,31 +76,24 @@ fotoIndexadaSchema.statics.estatisticasEvento = async function(evento) {
   const totalRegistros = await this.countDocuments({ evento });
   console.log(`[DEBUG] Total de registros encontrados para evento ${evento}: ${totalRegistros}`);
   
-  const resultado = await this.aggregate([
-    { $match: { evento } },
-    {
-      $group: {
-        _id: '$status',
-        count: { $sum: 1 }
-      }
-    }
-  ]);
+  // Fazer contagem individual para cada status para garantir precisão
+  const fotosIndexadas = await this.countDocuments({ evento, status: 'indexada' });
+  const fotosComErro = await this.countDocuments({ evento, status: 'erro' });
+  const fotosProcessando = await this.countDocuments({ evento, status: 'processando' });
   
-  console.log(`[DEBUG] Resultado da agregação:`, resultado);
+  console.log(`[DEBUG] Contagens individuais para evento ${evento}:`);
+  console.log(`[DEBUG] - Fotos indexadas: ${fotosIndexadas}`);
+  console.log(`[DEBUG] - Fotos com erro: ${fotosComErro}`);
+  console.log(`[DEBUG] - Fotos processando: ${fotosProcessando}`);
   
   const stats = {
-    indexadas: 0,
-    erros: 0,
-    processando: 0,
-    total: 0
+    indexadas: fotosIndexadas,
+    erros: fotosComErro,
+    processando: fotosProcessando,
+    total: totalRegistros
   };
   
-  resultado.forEach(item => {
-    stats[item._id] = item.count;
-    stats.total += item.count;
-  });
-  
-  console.log(`[DEBUG] Estatísticas finais:`, stats);
+  console.log(`[DEBUG] Estatísticas finais para ${evento}:`, stats);
   
   return stats;
 };

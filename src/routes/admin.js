@@ -1192,11 +1192,13 @@ router.get('/eventos/:evento/estatisticas-indexacao', authMiddleware, async (req
     // Obter estatísticas do banco de dados
     const estatisticas = await FotoIndexada.estatisticasEvento(evento);
     
-    console.log(`[DEBUG] Estatísticas do banco:`, estatisticas);
+    console.log(`[DEBUG] Estatísticas do banco para ${evento}:`, estatisticas);
     
     // Obter total de fotos no S3 para comparação
     let totalFotosS3 = 0;
     try {
+      console.log(`[DEBUG] Contando fotos no S3 para evento: ${evento}`);
+      
       const data = await minioService.s3.listObjectsV2({
         Bucket: minioService.bucket,
         Prefix: `${bucketPrefix}/${evento}/`,
@@ -1206,33 +1208,53 @@ router.get('/eventos/:evento/estatisticas-indexacao', authMiddleware, async (req
       const prefixes = (data.CommonPrefixes || []).map(p => p.Prefix.replace(`${bucketPrefix}/${evento}/`, '').replace('/', ''));
       const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
       
+      console.log(`[DEBUG] Prefixes encontrados para ${evento}:`, prefixes);
+      console.log(`[DEBUG] Dias detectados para ${evento}:`, dias);
+      
       if (dias.length > 0) {
         // Evento multi-dia
+        console.log(`[DEBUG] Processando evento multi-dia: ${evento}`);
         for (const dia of dias) {
           const coreografias = await minioService.listarCoreografias(evento, dia);
+          console.log(`[DEBUG] Dia ${dia}: ${coreografias.length} coreografias`);
           for (const coreografia of coreografias) {
             const caminho = `${evento}/${dia}/${coreografia.nome}`;
             const fotos = await minioService.listarFotosPorCaminho(caminho);
+            console.log(`[DEBUG] Caminho ${caminho}: ${fotos.length} fotos`);
             totalFotosS3 += fotos.length;
           }
         }
       } else {
         // Evento de um dia
+        console.log(`[DEBUG] Processando evento de um dia: ${evento}`);
         const coreografias = await minioService.listarCoreografias(evento);
+        console.log(`[DEBUG] Evento single-dia: ${coreografias.length} coreografias`);
         for (const coreografia of coreografias) {
           const caminho = `${evento}/${coreografia.nome}`;
           const fotos = await minioService.listarFotosPorCaminho(caminho);
+          console.log(`[DEBUG] Caminho ${caminho}: ${fotos.length} fotos`);
           totalFotosS3 += fotos.length;
         }
       }
+      
+      console.log(`[DEBUG] Total de fotos no S3 para ${evento}: ${totalFotosS3}`);
     } catch (s3Error) {
-      console.error('Erro ao contar fotos no S3:', s3Error);
+      console.error(`[DEBUG] Erro ao contar fotos no S3 para ${evento}:`, s3Error);
     }
     
     // Calcular percentual de indexação
     const percentualIndexado = totalFotosS3 > 0 ? ((estatisticas.indexadas / totalFotosS3) * 100).toFixed(1) : 0;
     
-    res.json({
+    console.log(`[DEBUG] Calculando percentual para ${evento}: ${estatisticas.indexadas}/${totalFotosS3} = ${percentualIndexado}%`);
+    
+    const ultimaIndexacao = await FotoIndexada.findOne({ evento, status: 'indexada' })
+      .sort({ indexadaEm: -1 })
+      .select('indexadaEm')
+      .then(doc => doc?.indexadaEm || null);
+    
+    console.log(`[DEBUG] Última indexação para ${evento}:`, ultimaIndexacao);
+    
+    const response = {
       evento,
       totalFotosS3,
       fotosIndexadas: estatisticas.indexadas,
@@ -1240,14 +1262,15 @@ router.get('/eventos/:evento/estatisticas-indexacao', authMiddleware, async (req
       fotosProcessando: estatisticas.processando,
       fotosNaoIndexadas: Math.max(0, totalFotosS3 - estatisticas.total),
       percentualIndexado: parseFloat(percentualIndexado),
-      ultimaIndexacao: await FotoIndexada.findOne({ evento, status: 'indexada' })
-        .sort({ indexadaEm: -1 })
-        .select('indexadaEm')
-        .then(doc => doc?.indexadaEm || null)
-    });
+      ultimaIndexacao
+    };
+    
+    console.log(`[DEBUG] Resposta final para ${evento}:`, response);
+    
+    res.json(response);
     
   } catch (error) {
-    console.error('Erro ao obter estatísticas de indexação:', error);
+    console.error(`[DEBUG] Erro ao obter estatísticas de indexação para ${req.params.evento}:`, error);
     res.status(500).json({ 
       erro: 'Erro ao obter estatísticas de indexação', 
       detalhes: error.message 
@@ -1260,38 +1283,58 @@ router.get('/eventos/:evento/diagnostico-indexacao', authMiddleware, async (req,
   try {
     const { evento } = req.params;
     
-    console.log(`[DEBUG] Diagnóstico para evento: ${evento}`);
+    console.log(`[DIAGNOSTICO] Analisando evento: ${evento}`);
     
-    // Buscar todas as fotos indexadas deste evento
-    const fotosIndexadas = await FotoIndexada.find({ evento }).sort({ indexadaEm: -1 });
+    // 1. Contar registros por status
+    const totalRegistros = await FotoIndexada.countDocuments({ evento });
+    const indexadas = await FotoIndexada.countDocuments({ evento, status: 'indexada' });
+    const erros = await FotoIndexada.countDocuments({ evento, status: 'erro' });
+    const processando = await FotoIndexada.countDocuments({ evento, status: 'processando' });
     
-    // Estatísticas detalhadas
-    const estatisticasPorStatus = await FotoIndexada.aggregate([
+    // 2. Listar alguns exemplos de cada status
+    const exemploIndexadas = await FotoIndexada.find({ evento, status: 'indexada' }).limit(5).select('nomeArquivo status indexadaEm');
+    const exemploErros = await FotoIndexada.find({ evento, status: 'erro' }).limit(5).select('nomeArquivo status erroDetalhes');
+    const exemploProcessando = await FotoIndexada.find({ evento, status: 'processando' }).limit(5).select('nomeArquivo status');
+    
+    // 3. Verificar se há registros duplicados
+    const duplicados = await FotoIndexada.aggregate([
       { $match: { evento } },
-      { $group: { _id: '$status', count: { $sum: 1 }, fotos: { $push: '$nomeArquivo' } } }
+      { $group: { _id: '$nomeArquivoNormalizado', count: { $sum: 1 } } },
+      { $match: { count: { $gt: 1 } } },
+      { $limit: 10 }
     ]);
     
-    // Últimas 10 fotos indexadas
-    const ultimasFotos = await FotoIndexada.find({ evento, status: 'indexada' })
+    // 4. Verificar últimas indexações
+    const ultimasIndexacoes = await FotoIndexada.find({ evento })
       .sort({ indexadaEm: -1 })
       .limit(10)
-      .select('nomeArquivo indexadaEm');
+      .select('nomeArquivo status indexadaEm');
     
     const diagnostico = {
       evento,
-      totalRegistros: fotosIndexadas.length,
-      estatisticasPorStatus,
-      ultimasFotos,
-      primeiraIndexacao: fotosIndexadas.length > 0 ? fotosIndexadas[fotosIndexadas.length - 1].indexadaEm : null,
-      ultimaIndexacao: fotosIndexadas.length > 0 ? fotosIndexadas[0].indexadaEm : null
+      timestamp: new Date(),
+      contagens: {
+        total: totalRegistros,
+        indexadas,
+        erros,
+        processando,
+        naoClassificados: totalRegistros - (indexadas + erros + processando)
+      },
+      exemplos: {
+        indexadas: exemploIndexadas,
+        erros: exemploErros,
+        processando: exemploProcessando
+      },
+      duplicados,
+      ultimasIndexacoes
     };
     
-    console.log(`[DEBUG] Diagnóstico completo:`, diagnostico);
+    console.log(`[DIAGNOSTICO] Resultado para ${evento}:`, JSON.stringify(diagnostico, null, 2));
     
     res.json(diagnostico);
     
   } catch (error) {
-    console.error('Erro no diagnóstico:', error);
+    console.error(`[DIAGNOSTICO] Erro para evento ${req.params.evento}:`, error);
     res.status(500).json({ 
       erro: 'Erro no diagnóstico', 
       detalhes: error.message 
