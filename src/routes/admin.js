@@ -25,19 +25,21 @@ const JWT_SECRET = process.env.JWT_SECRET || 'segredo123';
 
 // Middleware para proteger rotas
 function authMiddleware(req, res, next) {
-  // console.log(`[DEBUG] AuthMiddleware - Rota: ${req.method} ${req.path}`);
+  console.log(`[DEBUG] AuthMiddleware - Rota: ${req.method} ${req.path}`);
   const token = req.headers['authorization']?.split(' ')[1];
-  // console.log(`[DEBUG] AuthMiddleware - Token presente: ${!!token}`);
+  console.log(`[DEBUG] AuthMiddleware - Token presente: ${!!token}`);
+  console.log(`[DEBUG] AuthMiddleware - JWT_SECRET definido: ${!!JWT_SECRET}`);
   if (!token) {
-    // console.log(`[DEBUG] AuthMiddleware - Token não fornecido`);
+    console.log(`[DEBUG] AuthMiddleware - Token não fornecido`);
     return res.status(401).json({ error: 'Token não fornecido' });
   }
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) {
-      // console.log(`[DEBUG] AuthMiddleware - Token inválido:`, err.message);
-      return res.status(401).json({ error: 'Token inválido' });
+      console.log(`[DEBUG] AuthMiddleware - Token inválido:`, err.message);
+      console.log(`[DEBUG] AuthMiddleware - Erro detalhado:`, err);
+      return res.status(401).json({ error: 'Token inválido', details: err.message });
     }
-    // console.log(`[DEBUG] AuthMiddleware - Token válido, usuário: ${decoded.username}`);
+    console.log(`[DEBUG] AuthMiddleware - Token válido, usuário: ${decoded.username}`);
     req.user = decoded;
     next();
   });
