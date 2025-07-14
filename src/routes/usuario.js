@@ -197,11 +197,16 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
       secaoBanners += 'Produtos:\n';
       secaoBanners += banners.map(b => {
         const preco = Number(b.preco) || 0;
-        console.log(`[WhatsApp] Banner ${b.nome}: preço=${b.preco}, convertido=${preco}, categoria=${b.categoria}`);
+        console.log(`[WhatsApp] Banner ${b.nome}: preço=${b.preco}, convertido=${preco}, categoria=${b.categoria}, coreografia=${b.coreografia}`);
         
-        // O nome já deve vir formatado como "Vale Coreografia: Nome da Coreografia" ou "Vídeo: Nome da Coreografia"
-        // Vamos usar o nome como está, pois já contém a informação da coreografia
-        return `${b.nome} - R$ ${preco.toFixed(2).replace('.', ',')}`;
+        // Criar nome completo incluindo a coreografia
+        let nomeCompleto = b.nome;
+        if (b.coreografia && b.coreografia !== b.nome && b.coreografia !== 'Vale Coreografia' && b.coreografia !== 'Vídeo') {
+          // Se tem informação específica da coreografia, incluir no nome
+          nomeCompleto = `${b.nome}: ${b.coreografia}`;
+        }
+        
+        return `${nomeCompleto} - R$ ${preco.toFixed(2).replace('.', ',')}`;
       }).join('\n');
       secaoBanners += '\n\n';
     }
