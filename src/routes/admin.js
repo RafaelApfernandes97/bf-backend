@@ -98,14 +98,28 @@ router.get('/tabelas-preco', authMiddleware, async (req, res) => {
 });
 
 router.post('/tabelas-preco', authMiddleware, async (req, res) => {
-  const { nome, descricao, faixas, isDefault } = req.body;
-  const tabela = await TabelaPreco.create({ nome, descricao, faixas, isDefault });
+  const { nome, descricao, faixas, precoValeCoreografia, precoVideo, isDefault } = req.body;
+  const tabela = await TabelaPreco.create({ 
+    nome, 
+    descricao, 
+    faixas, 
+    precoValeCoreografia: precoValeCoreografia || 0,
+    precoVideo: precoVideo || 0,
+    isDefault 
+  });
   res.json(tabela);
 });
 
 router.put('/tabelas-preco/:id', authMiddleware, async (req, res) => {
-  const { nome, descricao, faixas, isDefault } = req.body;
-  const tabela = await TabelaPreco.findByIdAndUpdate(req.params.id, { nome, descricao, faixas, isDefault }, { new: true });
+  const { nome, descricao, faixas, precoValeCoreografia, precoVideo, isDefault } = req.body;
+  const tabela = await TabelaPreco.findByIdAndUpdate(req.params.id, { 
+    nome, 
+    descricao, 
+    faixas, 
+    precoValeCoreografia: precoValeCoreografia || 0,
+    precoVideo: precoVideo || 0,
+    isDefault 
+  }, { new: true });
   res.json(tabela);
 });
 
