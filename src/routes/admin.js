@@ -122,7 +122,7 @@ router.get('/eventos', authMiddleware, async (req, res) => {
 
 router.post('/eventos', authMiddleware, async (req, res) => {
   try {
-    const { nome, data, local, tabelaPrecoId, valorFixo, criarPasta = false } = req.body;
+    const { nome, data, local, tabelaPrecoId, valorFixo, criarPasta = false, exibirBannerValeCoreografia = false, exibirBannerVideo = false } = req.body;
     
     let pastaS3 = null;
     
@@ -143,7 +143,9 @@ router.post('/eventos', authMiddleware, async (req, res) => {
       local, 
       tabelaPrecoId, 
       valorFixo, 
-      pastaS3 
+      pastaS3,
+      exibirBannerValeCoreografia,
+      exibirBannerVideo
     });
     
     await evento.populate('tabelaPrecoId');
@@ -155,8 +157,16 @@ router.post('/eventos', authMiddleware, async (req, res) => {
 });
 
 router.put('/eventos/:id', authMiddleware, async (req, res) => {
-  const { nome, data, local, tabelaPrecoId, valorFixo } = req.body;
-  const evento = await Evento.findByIdAndUpdate(req.params.id, { nome, data, local, tabelaPrecoId, valorFixo }, { new: true });
+  const { nome, data, local, tabelaPrecoId, valorFixo, exibirBannerValeCoreografia, exibirBannerVideo } = req.body;
+  const evento = await Evento.findByIdAndUpdate(req.params.id, { 
+    nome, 
+    data, 
+    local, 
+    tabelaPrecoId, 
+    valorFixo, 
+    exibirBannerValeCoreografia, 
+    exibirBannerVideo 
+  }, { new: true });
   await evento.populate('tabelaPrecoId');
   res.json(evento);
 });
