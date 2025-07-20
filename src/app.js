@@ -109,6 +109,15 @@ async function initializeApp() {
     const redisConnected = await initRedis();
     console.log(`Redis: ${redisConnected ? 'Conectado' : 'Usando cache em memória'}`);
     
+    // Configurar bucket MinIO para acesso público
+    const { configurarBucketPublico } = require('./services/minio');
+    const bucketConfigurado = await configurarBucketPublico();
+    if (bucketConfigurado) {
+      console.log('✅ Bucket MinIO configurado para acesso público');
+    } else {
+      console.warn('⚠️ Falha ao configurar bucket MinIO - URLs assinadas serão usadas');
+    }
+    
     // Executa varredura completa na inicialização
     console.log('🚀 Iniciando varredura completa na inicialização...');
     setTimeout(async () => {

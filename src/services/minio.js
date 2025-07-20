@@ -29,6 +29,72 @@ const bucket = process.env.MINIO_BUCKET;
 const urlCache = new Map();
 const URL_CACHE_TTL = 2 * 60 * 60 * 1000; // 2 horas em ms
 
+// Função para configurar políticas de bucket para acesso público
+async function configurarBucketPublico() {
+  try {
+    console.log('🔧 Configurando bucket para acesso público...');
+    
+    // Política de bucket para permitir acesso público de leitura
+    const bucketPolicy = {
+      Version: '2012-10-17',
+      Statement: [
+        {
+          Sid: 'PublicReadGetObject',
+          Effect: 'Allow',
+          Principal: '*',
+          Action: [
+            's3:GetObject'
+          ],
+          Resource: [
+            `arn:aws:s3:::${bucket}/*`
+          ],
+          Condition: {
+            StringEquals: {
+              's3:ResourceType': 'object'
+            }
+          }
+        }
+      ]
+    };
+
+    // Aplicar política de bucket
+    await s3.putBucketPolicy({
+      Bucket: bucket,
+      Policy: JSON.stringify(bucketPolicy)
+    }).promise();
+
+    // Configurar CORS para permitir acesso de qualquer origem
+    const corsConfig = {
+      Bucket: bucket,
+      CORSConfiguration: {
+        CORSRules: [
+          {
+            AllowedHeaders: ['*'],
+            AllowedMethods: ['GET', 'HEAD'],
+            AllowedOrigins: ['*'],
+            ExposeHeaders: ['ETag', 'Content-Length', 'Content-Type'],
+            MaxAgeSeconds: 3000
+          }
+        ]
+      }
+    };
+
+    await s3.putBucketCors(corsConfig).promise();
+
+    console.log('✅ Bucket configurado com sucesso para acesso público');
+    return true;
+  } catch (error) {
+    console.error('❌ Erro ao configurar bucket:', error);
+    return false;
+  }
+}
+
+// Função para gerar URL pública direta (sem assinatura)
+function gerarUrlPublica(key) {
+  const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
+  return `${endpoint}/${bucket}/${encodeURIComponent(key)}`;
+}
+
 // Gera URL assinada otimizada com cache inteligente
 function gerarUrlAssinada(key, expiresIn = 7200) {
   const cacheKey = `${key}_${expiresIn}`;
@@ -501,6 +567,8 @@ module.exports = {
   s3,
   bucket,
   gerarUrlAssinada,
+  gerarUrlPublica,
+  configurarBucketPublico,
   listarEventos,
   listarCoreografias,
   listarFotos,

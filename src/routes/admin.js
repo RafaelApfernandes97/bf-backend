@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
 const Evento = require('../models/evento');
 const Usuario = require('../models/usuario');
 const Pedido = require('../models/pedido');
@@ -13,6 +14,22 @@ const minioService = require('../services/minio');
 const rekognitionService = require('../services/rekognition');
 const path = require('path');
 const sharp = require('sharp');
+
+// Configuração do multer para upload de arquivos
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB
+  },
+  fileFilter: (req, file, cb) => {
+    // Aceitar apenas imagens
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Apenas arquivos de imagem são permitidos'), false);
+    }
+  }
+});
 
 // Armazenamento em memória para progresso de indexação
 const progressoIndexacao = new Map();
@@ -90,7 +107,25 @@ router.delete('/tabelas-preco/:id', authMiddleware, async (req, res) => {
 // Atualizar rotas de eventos para usar tabela de preço
 router.get('/eventos', authMiddleware, async (req, res) => {
   const eventos = await Evento.find().populate('tabelaPrecoId');
-  res.json(eventos);
+  
+  // Converter capasDias de Map para objeto para serialização JSON
+  const eventosProcessados = eventos.map(evento => {
+    const eventoObj = evento.toObject();
+    if (eventoObj.capasDias) {
+      // Converter Map para objeto e mapear chaves normalizadas para originais
+      const capasObj = {};
+      for (const [chaveNormalizada, urlCapa] of eventoObj.capasDias) {
+        const diaOriginal = obterChaveOriginal(chaveNormalizada, eventoObj.diasSelecionados);
+        if (diaOriginal) {
+          capasObj[diaOriginal] = urlCapa;
+        }
+      }
+      eventoObj.capasDias = capasObj;
+    }
+    return eventoObj;
+  });
+  
+  res.json(eventosProcessados);
 });
 
 router.post('/eventos', authMiddleware, async (req, res) => {
@@ -140,7 +175,22 @@ router.get('/eventos/nome/:nome', async (req, res) => {
     if (!evento) {
       return res.status(404).json({ error: 'Evento não encontrado' });
     }
-    res.json(evento);
+    
+    // Converter capasDias de Map para objeto para serialização JSON
+    const eventoObj = evento.toObject();
+    if (eventoObj.capasDias) {
+      // Converter Map para objeto e mapear chaves normalizadas para originais
+      const capasObj = {};
+      for (const [chaveNormalizada, urlCapa] of eventoObj.capasDias) {
+        const diaOriginal = obterChaveOriginal(chaveNormalizada, eventoObj.diasSelecionados);
+        if (diaOriginal) {
+          capasObj[diaOriginal] = urlCapa;
+        }
+      }
+      eventoObj.capasDias = capasObj;
+    }
+    
+    res.json(eventoObj);
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar evento' });
   }
@@ -186,6 +236,113 @@ router.get('/eventos-minio/:eventoNome/pastas', authMiddleware, async (req, res)
   } catch (error) {
     console.error('Erro ao listar pastas do evento:', error);
     res.status(500).json({ error: 'Erro ao listar pastas do evento' });
+  }
+});
+
+// Função para normalizar chaves do Map (remover caracteres problemáticos)
+function normalizarChaveMap(chave) {
+  return chave.replace(/[.]/g, '_').replace(/[^a-zA-Z0-9_]/g, '_');
+}
+
+// Função para obter chave original a partir da normalizada
+function obterChaveOriginal(chaveNormalizada, diasSelecionados) {
+  return diasSelecionados.find(dia => normalizarChaveMap(dia) === chaveNormalizada);
+}
+
+// Upload de capa para um dia específico do evento
+router.post('/eventos/:eventoId/dias/:diaNome/capa', authMiddleware, upload.single('capa'), async (req, res) => {
+  try {
+    const { eventoId, diaNome } = req.params;
+    const { s3, bucket } = minioService;
+    
+    if (!req.file) {
+      return res.status(400).json({ error: 'Nenhuma imagem foi enviada' });
+    }
+    
+    // Buscar o evento
+    const evento = await Evento.findById(eventoId);
+    if (!evento) {
+      return res.status(404).json({ error: 'Evento não encontrado' });
+    }
+    
+    // Verificar se o dia está na lista de dias selecionados
+    if (!evento.diasSelecionados.includes(diaNome)) {
+      return res.status(400).json({ error: 'Dia não está na lista de dias selecionados' });
+    }
+    
+    // Gerar nome único para a capa
+    const extensao = req.file.originalname.split('.').pop();
+    const nomeArquivo = `capas/${eventoId}/${diaNome}_capa.${extensao}`;
+    
+    // Fazer upload para o MinIO
+    await s3.putObject({
+      Bucket: bucket,
+      Key: nomeArquivo,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype
+    }).promise();
+    
+    // Gerar URL pública da imagem (sem assinatura)
+    const urlCapa = `${process.env.MINIO_ENDPOINT}/${bucket}/${nomeArquivo}`;
+    
+    // Atualizar o evento com a URL da capa
+    if (!evento.capasDias) {
+      evento.capasDias = new Map();
+    }
+    
+    // Usar chave normalizada para o Map
+    const chaveNormalizada = normalizarChaveMap(diaNome);
+    evento.capasDias.set(chaveNormalizada, urlCapa);
+    await evento.save();
+    
+    res.json({ 
+      success: true, 
+      urlCapa,
+      message: `Capa do dia "${diaNome}" enviada com sucesso!` 
+    });
+    
+  } catch (error) {
+    console.error('Erro ao fazer upload da capa:', error);
+    res.status(500).json({ error: 'Erro ao fazer upload da capa' });
+  }
+});
+
+// Remover capa de um dia específico
+router.delete('/eventos/:eventoId/dias/:diaNome/capa', authMiddleware, async (req, res) => {
+  try {
+    const { eventoId, diaNome } = req.params;
+    const { s3, bucket } = minioService;
+    
+    // Buscar o evento
+    const evento = await Evento.findById(eventoId);
+    if (!evento) {
+      return res.status(404).json({ error: 'Evento não encontrado' });
+    }
+    
+    // Usar chave normalizada para buscar no Map
+    const chaveNormalizada = normalizarChaveMap(diaNome);
+    
+    // Verificar se existe capa para este dia
+    if (!evento.capasDias || !evento.capasDias.has(chaveNormalizada)) {
+      return res.status(404).json({ error: 'Capa não encontrada para este dia' });
+    }
+    
+    // Remover do MinIO (opcional - pode manter para histórico)
+    // const urlCapa = evento.capasDias.get(chaveNormalizada);
+    // const key = urlCapa.split('/').slice(-2).join('/'); // Extrair chave do MinIO
+    
+    // Remover do evento
+    evento.capasDias.delete(chaveNormalizada);
+    await evento.save();
+    
+    res.json({ 
+      success: true, 
+      message: `Capa do dia "${diaNome}" removida com sucesso!` 
+    });
+    
+  } catch (error) {
+    console.error('Erro ao remover capa:', error);
+    res.status(500).json({ error: 'Erro ao remover capa' });
   }
 });
 
