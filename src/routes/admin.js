@@ -129,23 +129,47 @@ router.get('/eventos', authMiddleware, async (req, res) => {
 });
 
 router.post('/eventos', authMiddleware, async (req, res) => {
-  const { nome, data, local, tabelaPrecoId, valorFixo, bannerVale, bannerVideo, bannerPoster, valorVale, valorVideo, valorPoster, diasSelecionados } = req.body;
-  const evento = await Evento.create({ 
-    nome, 
-    data, 
-    local, 
-    tabelaPrecoId, 
-    valorFixo,
-    bannerVale: !!bannerVale,
-    bannerVideo: !!bannerVideo,
-    bannerPoster: !!bannerPoster,
-    valorVale: valorVale || 0,
-    valorVideo: valorVideo || 0,
-    valorPoster: valorPoster || 0,
-    diasSelecionados: diasSelecionados || []
-  });
-  await evento.populate('tabelaPrecoId');
-  res.json(evento);
+  try {
+    console.log('[ADMIN] Criando evento - Dados recebidos:', req.body);
+    
+    const { nome, data, local, tabelaPrecoId, valorFixo, bannerVale, bannerVideo, bannerPoster, valorVale, valorVideo, valorPoster, diasSelecionados } = req.body;
+    
+    // Validação básica
+    if (!nome) {
+      console.log('[ADMIN] Erro: Nome do evento é obrigatório');
+      return res.status(400).json({ error: 'Nome do evento é obrigatório' });
+    }
+    
+    // Preparar dados para criação
+    const dadosEvento = {
+      nome,
+      data: data ? new Date(data) : undefined,
+      local,
+      tabelaPrecoId: tabelaPrecoId && mongoose.Types.ObjectId.isValid(tabelaPrecoId) ? tabelaPrecoId : null,
+      valorFixo: valorFixo ? Number(valorFixo) : undefined,
+      bannerVale: !!bannerVale,
+      bannerVideo: !!bannerVideo,
+      bannerPoster: !!bannerPoster,
+      valorVale: valorVale ? Number(valorVale) : 0,
+      valorVideo: valorVideo ? Number(valorVideo) : 0,
+      valorPoster: valorPoster ? Number(valorPoster) : 0,
+      diasSelecionados: Array.isArray(diasSelecionados) ? diasSelecionados : []
+    };
+    
+    console.log('[ADMIN] Dados processados para criação:', dadosEvento);
+    
+    const evento = await Evento.create(dadosEvento);
+    console.log('[ADMIN] Evento criado com sucesso:', evento._id);
+    
+    await evento.populate('tabelaPrecoId');
+    res.json(evento);
+  } catch (error) {
+    console.error('[ADMIN] Erro ao criar evento:', error);
+    res.status(500).json({ 
+      error: 'Erro interno do servidor ao criar evento',
+      details: error.message 
+    });
+  }
 });
 
 router.put('/eventos/:id', authMiddleware, async (req, res) => {

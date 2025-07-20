@@ -164,6 +164,8 @@ mongoose.connection.on('error', (err) => {
 require('./models/evento');
 require('./models/usuario');
 require('./models/tabelaPreco');
+require('./models/pedido');
+require('./models/cupom');
 
 // Inicializa o servidor
 const port = process.env.PORT || 3001;
