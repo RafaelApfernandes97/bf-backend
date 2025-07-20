@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Usuario = require('../models/usuario');
 const Pedido = require('../models/pedido');
+const Cupom = require('../models/cupom');
 const { sendOrderSummary } = require('../services/evolutionapi');
 const { gerarUrlAssinada } = require('../services/minio');
 
@@ -37,7 +38,7 @@ function authMiddleware(req, res, next) {
 
 // Cadastro de usuário final
 router.post('/register', async (req, res) => {
-  const { email, senha, nome, cpfCnpj, telefone, cep, rua, numero, bairro, cidade, estado } = req.body;
+  const { email, senha, nome, cpfCnpj, telefone, cep, rua, numero, complemento, bairro, cidade, estado } = req.body;
   if (!email || !senha || !nome) {
     return res.status(400).json({ error: 'Preencha todos os campos obrigatórios.' });
   }
@@ -57,7 +58,7 @@ router.post('/register', async (req, res) => {
   const exists = await Usuario.findOne({ email });
   if (exists) return res.status(400).json({ error: 'E-mail já cadastrado.' });
   const hash = await bcrypt.hash(senha, 10);
-  const user = await Usuario.create({ email, password: hash, nome, cpfCnpj: cpfCnpj || '', telefone: telefone || '', cep, rua, numero, bairro, cidade, estado });
+  const user = await Usuario.create({ email, password: hash, nome, cpfCnpj: cpfCnpj || '', telefone: telefone || '', cep, rua, numero, complemento: complemento || '', bairro, cidade, estado });
   res.json({ ok: true });
 });
 
@@ -97,7 +98,7 @@ router.get('/me', authMiddleware, async (req, res) => {
 // Rota para atualizar dados do usuário autenticado
 router.put('/me', authMiddleware, async (req, res) => {
   try {
-    const { nome, cpfCnpj, telefone, cep, rua, numero, bairro, cidade, estado } = req.body;
+    const { nome, cpfCnpj, telefone, cep, rua, numero, complemento, bairro, cidade, estado } = req.body;
     const user = await Usuario.findById(req.user.id);
     if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
     if (nome) user.nome = nome;
@@ -106,6 +107,7 @@ router.put('/me', authMiddleware, async (req, res) => {
     if (cep) user.cep = cep;
     if (rua) user.rua = rua;
     if (numero) user.numero = numero;
+    if (complemento !== undefined) user.complemento = complemento; // Permite string vazia
     if (bairro) user.bairro = bairro;
     if (cidade) user.cidade = cidade;
     if (estado) user.estado = estado;
@@ -121,7 +123,7 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
   console.log('[WhatsApp] Iniciando envio de pedido...');
   try {
     console.log('[WhatsApp] Body recebido:', req.body);
-    const { evento, fotos, valorUnitario } = req.body; // fotos: array de objetos com nome, url, coreografia
+    const { evento, fotos, valorUnitario, cupom } = req.body; // fotos: array de objetos com nome, url, coreografia, cupom: dados do cupom aplicado
     console.log('[WhatsApp] Evento:', evento);
     console.log('[WhatsApp] Fotos:', fotos);
     console.log('[WhatsApp] Valor unitário:', valorUnitario);
@@ -136,15 +138,81 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
       email: user.email,
       telefone: user.telefone,
       cpfCnpj: user.cpfCnpj,
-      endereco: `${user.rua}, ${user.numero} - ${user.bairro}, ${user.cidade} - ${user.estado}, CEP: ${user.cep}`
+      endereco: `${user.rua}, ${user.numero}${user.complemento ? `, ${user.complemento}` : ''} - ${user.bairro}, ${user.cidade} - ${user.estado}, CEP: ${user.cep}`
     });
     
     // Gerar ID único do pedido
     const pedidoId = await Pedido.gerarPedidoId();
     console.log('[WhatsApp] ID do pedido gerado:', pedidoId);
     
-    // Calcular valor total
-    const valorTotal = fotos.length * valorUnitario;
+    // Separar itens por tipo para cálculo correto
+    console.log('[WhatsApp] Debug - Analisando itens recebidos:', fotos.map(f => ({
+      nome: f.nome,
+      tipo: f.tipo,
+      valor: f.valor,
+      preco: f.preco
+    })));
+    
+    const fotosBanner = fotos.filter(f => f.tipo === 'vale' || f.tipo === 'video' || f.tipo === 'poster');
+    const fotosRegulares = fotos.filter(f => !f.tipo || (f.tipo !== 'vale' && f.tipo !== 'video' && f.tipo !== 'poster'));
+    
+    console.log('[WhatsApp] Banners encontrados:', fotosBanner.length);
+    console.log('[WhatsApp] Fotos regulares encontradas:', fotosRegulares.length);
+    
+    // Calcular valor total base
+    const valorFotosRegulares = fotosRegulares.length * valorUnitario;
+    const valorBanners = fotosBanner.reduce((total, item) => {
+      return total + (Number(item.valor) || Number(item.preco) || 0);
+    }, 0);
+    
+    const valorBase = valorFotosRegulares + valorBanners;
+    let valorTotal = valorBase;
+    let cupomData = null;
+    
+    // Processar cupom se fornecido
+    if (cupom && cupom.cupom && cupom.cupom.id) {
+      console.log('[WhatsApp] Processando cupom:', cupom.cupom.codigo);
+      console.log('[WhatsApp] Dados completos do cupom recebido:', JSON.stringify(cupom, null, 2));
+      try {
+        const cupomDoc = await Cupom.findById(cupom.cupom.id);
+        if (cupomDoc) {
+          console.log('[WhatsApp] Cupom encontrado no banco. Verificando se usuário já usou...');
+          console.log('[WhatsApp] limitarPorUsuario:', cupomDoc.limitarPorUsuario);
+          console.log('[WhatsApp] usuariosQueUsaram:', cupomDoc.usuariosQueUsaram);
+          
+          // Verificar novamente se usuário já usou antes de registrar
+          if (cupomDoc.limitarPorUsuario && cupomDoc.usuarioJaUsou(user._id)) {
+            console.log('[WhatsApp] ERRO: Usuário já usou este cupom!');
+            return res.status(400).json({ 
+              error: 'Este cupom já foi utilizado por você. Cada usuário pode usar este cupom apenas uma vez.' 
+            });
+          }
+          
+          // Usar o cupom (registra o uso DEFINITIVO)
+          console.log('[WhatsApp] Registrando uso do cupom...');
+          await cupomDoc.usarCupom(user._id, null); // pedidoId será atualizado depois
+          
+          // Aplicar desconto
+          valorTotal = valorBase - cupom.desconto;
+          cupomData = {
+            codigo: cupom.cupom.codigo,
+            descricao: cupom.cupom.descricao,
+            desconto: cupom.desconto,
+            cupomId: cupomDoc._id
+          };
+          console.log('[WhatsApp] Cupom aplicado com sucesso. Desconto:', cupom.desconto);
+        } else {
+          console.log('[WhatsApp] ERRO: Cupom não encontrado no banco');
+        }
+      } catch (error) {
+        console.error('[WhatsApp] Erro ao processar cupom:', error.message);
+        // Se erro é sobre uso já realizado, retorna erro para usuário
+        if (error.message.includes('já foi utilizado')) {
+          return res.status(400).json({ error: error.message });
+        }
+        // Para outros erros, continua sem cupom
+      }
+    }
     
     // Criar pedido no banco de dados
     const novoPedido = new Pedido({
@@ -154,15 +222,60 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
       fotos: fotos,
       valorUnitario: valorUnitario,
       valorTotal: valorTotal,
+      cupom: cupomData, // Inclui dados do cupom se aplicado
       status: 'pendente'
     });
     
     await novoPedido.save();
     console.log('[WhatsApp] Pedido salvo no banco de dados');
     
+    // Usar variáveis já declaradas acima e criar subtipos
+    const valebanner = fotosBanner.filter(f => f.tipo === 'vale');
+    const videoBanner = fotosBanner.filter(f => f.tipo === 'video');
+    const posterBanner = fotosBanner.filter(f => f.tipo === 'poster');
+    
     // Montar mensagem com ID do pedido
     // Inserir caractere invisível após o @ para evitar link no WhatsApp
     const emailTexto = user.email.replace('@', '@\u200B');
+    
+    let itensDetalhados = '';
+    
+    // Adicionar fotos regulares
+    if (fotosRegulares.length > 0) {
+      itensDetalhados += `📸 Fotos (${fotosRegulares.length} itens):\n`;
+      itensDetalhados += fotosRegulares.map(f => `• ${f.nome}`).join('\n');
+      itensDetalhados += `\n`;
+    }
+    
+    // Adicionar produtos (banners)
+    if (fotosBanner.length > 0) {
+      itensDetalhados += `${fotosRegulares.length > 0 ? '\n' : ''}🛍️ Produtos (${fotosBanner.length} itens):\n`;
+      
+      // Adicionar banners vale
+      if (valebanner.length > 0) {
+        valebanner.forEach(item => {
+          const valor = Number(item.valor) || Number(item.preco) || 0;
+          itensDetalhados += `• ${item.nome} - R$ ${valor.toFixed(2).replace('.', ',')}\n`;
+        });
+      }
+      
+      // Adicionar banners vídeo
+      if (videoBanner.length > 0) {
+        videoBanner.forEach(item => {
+          const valor = Number(item.valor) || Number(item.preco) || 0;
+          itensDetalhados += `• ${item.nome} - R$ ${valor.toFixed(2).replace('.', ',')}\n`;
+        });
+      }
+      
+      // Adicionar banners pôster
+      if (posterBanner.length > 0) {
+        posterBanner.forEach(item => {
+          const valor = Number(item.valor) || Number(item.preco) || 0;
+          itensDetalhados += `• ${item.nome} - R$ ${valor.toFixed(2).replace('.', ',')}\n`;
+        });
+      }
+    }
+    
     const mensagem = `Seu pedido foi recebido aqui no Ballet em Foco! ✨
 
 
@@ -174,15 +287,20 @@ Nome: ${user.nome}
 Email: ${emailTexto}
 Telefone: ${user.telefone}
 CPF: ${user.cpfCnpj}
-Endereço: ${user.rua}, ${user.numero} - ${user.bairro}, ${user.cidade} - ${user.estado}, CEP: ${user.cep}
+Endereço: ${user.rua}, ${user.numero}${user.complemento ? `, ${user.complemento}` : ''} - ${user.bairro}, ${user.cidade} - ${user.estado}, CEP: ${user.cep}
 
-Fotos:
-${fotos.map(f => `${f.nome}`).join('\n')}
+${itensDetalhados}
+Total de Itens: ${fotos.length}${fotosRegulares.length > 0 ? `
+Valor por Foto: R$ ${valorUnitario.toFixed(2).replace('.', ',')}
+Subtotal Fotos: R$ ${valorFotosRegulares.toFixed(2).replace('.', ',')}` : ''}${fotosBanner.length > 0 ? `
+Subtotal Produtos: R$ ${valorBanners.toFixed(2).replace('.', ',')}` : ''}${cupomData ? `
 
-Imagens Selecionadas: ${fotos.length}
-Valor Unitário: R$ ${valorUnitario.toFixed(2).replace('.', ',')}
+🎟️ Cupom Aplicado: ${cupomData.codigo}
+Descrição: ${cupomData.descricao}
+Desconto: R$ ${cupomData.desconto.toFixed(2).replace('.', ',')}
+Subtotal: R$ ${valorBase.toFixed(2).replace('.', ',')}` : ''}
 
-Valor Total: R$ ${valorTotal.toFixed(2).replace('.', ',')}`;
+💰 Valor Total: R$ ${valorTotal.toFixed(2).replace('.', ',')}`;
     console.log('[WhatsApp] Mensagem montada:', mensagem);
     
     const numero = user.telefone; // O serviço evolutionapi.js adiciona o +55 automaticamente

@@ -1,7 +1,8 @@
 const AWS = require('aws-sdk');
-const { getFromCache, setCache, generateCacheKey, clearAllCache } = require('./cache');
+const { getFromCache, setCache, smartCache, generateCacheKey, clearAllCache } = require('./cache');
 require('dotenv').config();
 
+// Pool de conexões otimizado para MinIO
 const s3 = new AWS.S3({
   endpoint: process.env.MINIO_ENDPOINT,
   accessKeyId: process.env.MINIO_ACCESS_KEY,
@@ -9,421 +10,504 @@ const s3 = new AWS.S3({
   s3ForcePathStyle: true,
   signatureVersion: 'v4',
   region: 'us-east-1',
-  maxRetries: 3,
+  maxRetries: 5,
+  retryDelayOptions: {
+    customBackoff: function(retryCount) {
+      return Math.pow(2, retryCount) * 100; // backoff exponencial
+    }
+  },
   httpOptions: {
-    timeout: 10000, // 10 segundos
-    connectTimeout: 5000 // 5 segundos
+    timeout: 30000, // 30 segundos
+    connectTimeout: 10000, // 10 segundos
+    agent: false // Usar agent padrão para pooling
   }
 });
 
 const bucket = process.env.MINIO_BUCKET;
 
-// Gera URL assinada com expiração otimizada
-function gerarUrlAssinada(key, expiresIn = 3600) {
-  const params = {
-    Bucket: bucket,
-    Key: key,
-    Expires: expiresIn,
-  };
-  return s3.getSignedUrl('getObject', params);
+// Cache em memória para URLs pré-assinadas (ultra-rápido)
+const urlCache = new Map();
+const URL_CACHE_TTL = 2 * 60 * 60 * 1000; // 2 horas em ms
+
+// Gera URL assinada otimizada com cache inteligente
+function gerarUrlAssinada(key, expiresIn = 7200) {
+  const cacheKey = `${key}_${expiresIn}`;
+  const cached = urlCache.get(cacheKey);
+  
+  if (cached && Date.now() < cached.expires) {
+    return cached.url;
+  }
+  
+  try {
+    const params = {
+      Bucket: bucket,
+      Key: key,
+      Expires: expiresIn,
+    };
+    const url = s3.getSignedUrl('getObject', params);
+    
+    // Cache URL com tempo de expiração
+    urlCache.set(cacheKey, {
+      url,
+      expires: Date.now() + (URL_CACHE_TTL)
+    });
+    
+    return url;
+  } catch (error) {
+    console.error('Erro ao gerar URL assinada:', error);
+    // Fallback para URL pública
+    const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
+    return `${endpoint}/${bucket}/${encodeURIComponent(key)}`;
+  }
 }
 
-// Lista eventos SEM cache (sempre busca o estado atual do bucket)
+// Lista eventos com cache em memória ultra-rápido
 async function listarEventos() {
+  const cacheKey = 'eventos_lista_rapida';
+  
   try {
-    const data = await s3.listObjectsV2({ 
-      Bucket: bucket, 
-      Delimiter: '/' 
-    }).promise();
-    return (data.CommonPrefixes || []).map(prefix => prefix.Prefix.replace('/', ''));
+    // Tenta cache em memória primeiro (sub-segundo)
+    let eventos = await getFromCache(cacheKey, true);
+    
+    if (!eventos) {
+      // Se não há cache, busca do MinIO
+      const data = await s3.listObjectsV2({ 
+        Bucket: bucket, 
+        Delimiter: '/',
+        MaxKeys: 100 // Limite para performance
+      }).promise();
+      
+      eventos = (data.CommonPrefixes || []).map(prefix => prefix.Prefix.replace('/', ''));
+      
+             // Cache crítico - eventos são muito acessados
+       await smartCache(cacheKey, eventos, 3600, 'critical');
+    }
+    
+    return eventos;
   } catch (error) {
     console.error('Erro ao listar eventos:', error);
     throw error;
   }
 }
 
-// Função recursiva para contar todas as fotos em uma pasta e subpastas, agora com cache
+// Contador de fotos otimizado com cache agressivo
 async function contarFotosRecursivo(prefix) {
-  const cacheKey = `fotos_count:${prefix}`;
+  const cacheKey = `count_fast:${prefix}`;
+  
+  // Cache ultra-longo para contadores (6 horas)
   let total = await getFromCache(cacheKey);
   if (typeof total === 'number') {
     return total;
   }
-  total = 0;
-  let ContinuationToken = undefined;
-  do {
+  
+  try {
+    total = 0;
+    let ContinuationToken = undefined;
+    
+    // Otimização: usar MaxKeys para paginar rapidamente
+    do {
+      const data = await s3.listObjectsV2({
+        Bucket: bucket,
+        Prefix: prefix,
+        ContinuationToken,
+        MaxKeys: 1000 // Processar em lotes
+      }).promise();
+      
+      total += (data.Contents || []).filter(obj =>
+        /\.(jpe?g|png|webp|gif)$/i.test(obj.Key) && !obj.Key.endsWith('/')
+      ).length;
+      
+      ContinuationToken = data.IsTruncated ? data.NextContinuationToken : undefined;
+    } while (ContinuationToken);
+    
+    // Cache por 6 horas (contadores mudam raramente)
+    await setCache(cacheKey, total, 21600);
+    return total;
+  } catch (error) {
+    console.error('Erro ao contar fotos:', error);
+    return 0; // Retorna 0 em caso de erro
+  }
+}
+
+// Lista coreografias com cache multi-layer e lazy loading
+async function listarCoreografias(evento, dia = null) {
+  // Adicionar versão para invalidar cache após correção de capas
+  const version = 'v3_capas_corrigidas';
+  const cacheKey = dia ? 
+    generateCacheKey('coreografias_fast', version, evento, dia) : 
+    generateCacheKey('coreografias_fast', version, evento);
+  
+  try {
+    // Cache em memória primeiro
+    let coreografias = await getFromCache(cacheKey, true);
+    
+    if (!coreografias) {
+      // Busca do Redis
+      coreografias = await getFromCache(cacheKey, false);
+      
+      if (!coreografias) {
+        // Busca do MinIO com otimizações
+        const prefix = dia ? `${evento}/${dia}/` : `${evento}/`;
+        const data = await s3.listObjectsV2({
+          Bucket: bucket,
+          Prefix: prefix,
+          Delimiter: '/',
+          MaxKeys: 50 // Limite para performance
+        }).promise();
+
+        // Processamento paralelo otimizado
+        coreografias = await Promise.all(
+          (data.CommonPrefixes || []).map(async (p) => {
+            const nome = p.Prefix.replace(prefix, '').replace('/', '');
+            const pastaCoreografia = dia ? `${evento}/${dia}/${nome}/` : `${evento}/${nome}/`;
+
+            // Busca paralela de quantidade e capa
+            const [quantidade, primeiraFoto] = await Promise.all([
+              contarFotosRecursivo(pastaCoreografia),
+              obterPrimeiraFoto(pastaCoreografia)
+            ]);
+
+            const imagemCapa = primeiraFoto 
+              ? gerarUrlAssinada(primeiraFoto, 14400) // 4 horas
+              : '/img/sem_capa.jpg';
+
+            return {
+              nome,
+              capa: imagemCapa,
+              quantidade,
+              pastaCoreografia // Adiciona para lazy loading
+            };
+          })
+        );
+
+                 // Cache inteligente para coreografias
+         await smartCache(cacheKey, coreografias, 1800, 'frequent');
+       } else {
+         // Promove do Redis para memória
+         await setCache(cacheKey, coreografias, 900, true);
+       }
+    }
+    
+    return coreografias;
+  } catch (error) {
+    console.error('Erro ao listar coreografias:', error);
+    throw error;
+  }
+}
+
+// Função auxiliar para extrair número de um nome de arquivo
+function extrairNumero(nome) {
+  // Padrão específico: "01 (1).webp", "01 (10).webp", etc.
+  // Prioridade 1: Número entre parênteses (mais específico)
+  const parenteses = nome.match(/\((\d+)\)/);
+  if (parenteses) {
+    return parseInt(parenteses[1], 10);
+  }
+  
+  // Prioridade 2: Número após espaço antes da extensão
+  const aposEspaco = nome.match(/\s(\d+)(?:\.|$)/);
+  if (aposEspaco) {
+    return parseInt(aposEspaco[1], 10);
+  }
+  
+  // Prioridade 3: Número no início seguido de underscore ou espaço
+  const inicio = nome.match(/^(\d+)[_\s]/);
+  if (inicio) {
+    return parseInt(inicio[1], 10);
+  }
+  
+  // Prioridade 4: Primeiro número encontrado
+  const qualquerNumero = nome.match(/(\d+)/);
+  if (qualquerNumero) {
+    return parseInt(qualquerNumero[1], 10);
+  }
+  
+  // Se não encontrar número, retornar um valor alto para ficar no final
+  return 999999;
+}
+
+// Função auxiliar para ordenar fotos por número
+function ordenarFotosPorNumero(fotos) {
+  const resultado = fotos.sort((a, b) => {
+    const nomeA = a.Key || a.nome;
+    const nomeB = b.Key || b.nome;
+    
+    const numA = extrairNumero(nomeA);
+    const numB = extrairNumero(nomeB);
+    
+    // Se os números são diferentes, ordenar por número
+    if (numA !== numB) {
+      return numA - numB;
+    }
+    
+    // Se os números são iguais, usar ordem alfabética como desempate
+    return nomeA.localeCompare(nomeB, 'pt', { numeric: true, sensitivity: 'base' });
+  });
+  
+  // Log resumido para debug
+  if (fotos.length > 0) {
+    console.log(`[ORDENAÇÃO] Ordenadas ${fotos.length} fotos. Primeiras 3: ${resultado.slice(0, 3).map(f => f.Key || f.nome).join(', ')}`);
+  }
+  
+  return resultado;
+}
+
+// Nova função otimizada para obter primeira foto
+async function obterPrimeiraFoto(prefix) {
+  try {
+    console.log(`[PRIMEIRA_FOTO] Buscando primeira foto para: ${prefix}`);
     const data = await s3.listObjectsV2({
       Bucket: bucket,
       Prefix: prefix,
-      ContinuationToken,
+      MaxKeys: 50 // Buscar mais fotos para garantir ordenação correta
     }).promise();
-    total += (data.Contents || []).filter(obj =>
-      /\.(jpe?g|png|webp)$/i.test(obj.Key)
-    ).length;
-    const subpastas = (data.CommonPrefixes || []).map(p => p.Prefix);
-    for (const subpasta of subpastas) {
-      total += await contarFotosRecursivo(subpasta);
+    
+    const fotos = (data.Contents || [])
+      .filter(obj => !obj.Key.endsWith('/'))
+      .filter(obj => /\.(jpe?g|png|webp|gif)$/i.test(obj.Key));
+    
+    if (fotos.length === 0) {
+      console.log(`[PRIMEIRA_FOTO] Nenhuma foto encontrada em: ${prefix}`);
+      return null;
     }
-    ContinuationToken = data.IsTruncated ? data.NextContinuationToken : undefined;
-  } while (ContinuationToken);
-  await setCache(cacheKey, total, 1800); // 30 minutos
-  return total;
-}
-
-// Lista coreografias com cache (suporta eventos com dias)
-async function listarCoreografias(evento, dia = null) {
-  const cacheKey = dia ? 
-    generateCacheKey('evento', evento, 'dia', dia, 'coreografias') : 
-    generateCacheKey('evento', evento, 'coreografias');
-  
-  // Tenta obter do cache primeiro
-  let coreografias = await getFromCache(cacheKey);
-  
-  if (!coreografias) {
-    try {
-      const prefix = dia ? `${evento}/${dia}/` : `${evento}/`;
-      const data = await s3.listObjectsV2({
-        Bucket: bucket,
-        Prefix: prefix,
-        Delimiter: '/',
-      }).promise();
-
-      coreografias = await Promise.all(
-        (data.CommonPrefixes || []).map(async (p) => {
-          const nome = p.Prefix.replace(prefix, '').replace('/', '');
-          const pastaCoreografia = dia ? `${evento}/${dia}/${nome}/` : `${evento}/${nome}/`;
-
-          // Conta fotos recursivamente
-          const quantidade = await contarFotosRecursivo(pastaCoreografia);
-
-          // Lista objetos dentro da coreografia para pegar capa
-          const objetos = await s3.listObjectsV2({
-            Bucket: bucket,
-            Prefix: pastaCoreografia,
-          }).promise();
-
-          const fotos = objetos.Contents.filter(obj =>
-            /\.(jpe?g|png|webp)$/i.test(obj.Key)
-          );
-
-          const imagemCapa = fotos.length > 0
-            ? gerarUrlAssinada(fotos[0].Key, 7200)
-            : '/img/sem_capa.jpg';
-
-          return {
-            nome,
-            capa: imagemCapa,
-            quantidade,
-          };
-        })
-      );
-
-      // Salva no cache por 30 minutos
-      await setCache(cacheKey, coreografias, 1800);
-    } catch (error) {
-      console.error('Erro ao listar coreografias:', error);
-      throw error;
-    }
+    
+    // Ordenar fotos e retornar a primeira
+    const fotosOrdenadas = ordenarFotosPorNumero(fotos);
+    console.log(`[PRIMEIRA_FOTO] Primeira foto ordenada para ${prefix}: ${fotosOrdenadas[0].Key}`);
+    return fotosOrdenadas[0].Key;
+  } catch (error) {
+    console.error('Erro ao obter primeira foto:', error);
+    return null;
   }
-  
-  return coreografias;
 }
 
-// Lista fotos com cache (suporta eventos com dias)
-async function listarFotos(evento, coreografia, dia = null) {
+// Lista fotos com paginação e cache otimizado
+async function listarFotos(evento, coreografia, dia = null, page = 1, limit = 50) {
+  // Adicionar versão para invalidar cache após correção de ordenação
+  const version = 'v2_ordenacao_corrigida';
   const cacheKey = dia ? 
-    generateCacheKey('evento', evento, 'dia', dia, 'coreografia', coreografia, 'fotos') : 
-    generateCacheKey('evento', evento, 'coreografia', coreografia, 'fotos');
+    generateCacheKey('fotos_paged', version, evento, dia, coreografia, page, limit) : 
+    generateCacheKey('fotos_paged', version, evento, coreografia, page, limit);
   
-  // Tenta obter do cache primeiro
-  let fotos = await getFromCache(cacheKey);
-  // console.log('[MinIO] listarFotos - Cache key:', cacheKey);
-  // console.log('[MinIO] listarFotos - Fotos do cache:', fotos ? fotos.length : 'null');
-  
-  if (!fotos) {
-    try {
-      const prefix = dia ? `${evento}/${dia}/${coreografia}/` : `${evento}/${coreografia}/`;
-      // console.log('[MinIO] listarFotos - Prefix:', prefix);
-      // console.log('[MinIO] listarFotos - Bucket:', bucket);
+  try {
+    // Cache em memória primeiro
+    let resultado = await getFromCache(cacheKey, true);
+    
+    if (!resultado) {
+      // Cache Redis
+      resultado = await getFromCache(cacheKey, false);
       
-      const data = await s3.listObjectsV2({
-        Bucket: bucket,
-        Prefix: prefix,
-      }).promise();
-      
-      // console.log('[MinIO] listarFotos - Objetos encontrados:', data.Contents?.length || 0);
+      if (!resultado) {
+        // Busca do MinIO com paginação
+        const prefix = dia ? `${evento}/${dia}/${coreografia}/` : `${evento}/${coreografia}/`;
+        const offset = (page - 1) * limit;
+        
+        const data = await s3.listObjectsV2({
+          Bucket: bucket,
+          Prefix: prefix,
+          MaxKeys: 1000 // Busca mais para paginar localmente
+        }).promise();
 
-      // Monta a URL pública (sem assinatura)
-      const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
-      fotos = (data.Contents || [])
-        .filter(obj => !obj.Key.endsWith('/'))
-        .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
-        .map(obj => {
+        const fotosAOrdenar = (data.Contents || [])
+          .filter(obj => !obj.Key.endsWith('/'))
+          .filter(obj => /\.(jpe?g|png|webp|gif)$/i.test(obj.Key));
+        
+        const todasFotos = ordenarFotosPorNumero(fotosAOrdenar);
+
+        const total = todasFotos.length;
+        const fotosPagina = todasFotos.slice(offset, offset + limit);
+        
+        // Gera URLs otimizadas em paralelo
+        const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
+        const fotos = fotosPagina.map(obj => {
           const nomeArquivo = obj.Key.replace(prefix, '');
-          // Codifica cada parte do caminho separadamente para evitar problemas
-          const partesPath = obj.Key.split('/');
-          const urlPath = partesPath.map(parte => encodeURIComponent(parte)).join('/');
+          const urlPath = obj.Key.split('/').map(parte => encodeURIComponent(parte)).join('/');
           
           return {
             nome: nomeArquivo,
             url: `${endpoint}/${bucket}/${urlPath}`,
+            key: obj.Key,
+            size: obj.Size,
+            lastModified: obj.LastModified
           };
         });
 
-      // Salva no cache por 1 hora (URL pública não expira)
-      await setCache(cacheKey, fotos, 3600);
-    } catch (error) {
-      console.error('Erro ao listar fotos:', error);
-      throw error;
+        resultado = {
+          fotos,
+          pagination: {
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit),
+            hasNext: page * limit < total,
+            hasPrev: page > 1
+          }
+        };
+
+                 // Cache inteligente baseado no tamanho dos dados
+         await smartCache(cacheKey, resultado, 3600, 'auto');
+       } else {
+         // Promove do Redis para memória se dados pequenos
+         const dataSize = JSON.stringify(resultado).length;
+         if (dataSize < 10240) { // < 10KB
+           await setCache(cacheKey, resultado, 1800, true);
+         }
+       }
     }
+    
+    return resultado;
+  } catch (error) {
+    console.error('Erro ao listar fotos:', error);
+    throw error;
   }
-  
-  return fotos;
 }
 
-// Função para pré-carregar dados populares
+// Função para pré-carregar dados críticos de forma inteligente
 async function preCarregarDadosPopulares() {
   try {
-    // console.log('🔄 Iniciando varredura completa no MinIO...');
+    console.log('🚀 Iniciando pré-carregamento inteligente...');
     
-    // Limpa todo o cache antes de recarregar
-    await clearAllCache();
-    // console.log('🧹 Cache limpo, iniciando nova varredura...');
+    // 1. Carrega eventos primeiro (crítico)
+    console.log('📂 Carregando lista de eventos...');
+    const eventos = await listarEventos();
+    console.log(`✅ ${eventos.length} eventos carregados`);
     
-    // Lista eventos diretamente do MinIO (sem cache)
-    // console.log('📂 Varredura de eventos...');
-    const data = await s3.listObjectsV2({ 
-      Bucket: bucket, 
-      Delimiter: '/' 
-    }).promise();
+    // 2. Pré-carrega só os 3 eventos mais recentes (otimização)
+    const eventosRecentes = eventos.slice(-3);
+    console.log(`🎯 Pré-carregando ${eventosRecentes.length} eventos recentes:`, eventosRecentes);
     
-    const eventos = (data.CommonPrefixes || []).map(prefix => prefix.Prefix.replace('/', ''));
-    // console.log(`✅ Encontrados ${eventos.length} eventos:`, eventos);
-    
-    // Para cada evento, faz varredura completa
-    const preloadPromises = eventos.map(async (evento) => {
-      try {
-        // console.log(`🔄 Varredura completa do evento: ${evento}`);
-        
-        // Verifica se é um evento multi-dia
-        const diasData = await s3.listObjectsV2({
-          Bucket: bucket,
-          Prefix: `${evento}/`,
-          Delimiter: '/',
-        }).promise();
-        
-        const dias = (diasData.CommonPrefixes || [])
-          .map(prefix => prefix.Prefix.replace(`${evento}/`, '').replace('/', ''))
-          .filter(nome => /^\d{2}-\d{2}-/.test(nome)); // formato DD-MM-dia
-        
-        if (dias.length > 0) {
-          // Evento multi-dia - varredura completa de todos os dias
-          // console.log(`📅 Evento ${evento} tem ${dias.length} dias:`, dias);
+    // 3. Carregamento paralelo otimizado
+    await Promise.all(
+      eventosRecentes.map(async (evento) => {
+        try {
+          console.log(`🔄 Pré-carregando: ${evento}`);
           
-          for (const dia of dias) {
-            try {
-              // console.log(`🔄 Varredura do dia: ${evento}/${dia}`);
-              
-              // Lista coreografias do dia
-              const coreografiasData = await s3.listObjectsV2({
-                Bucket: bucket,
-                Prefix: `${evento}/${dia}/`,
-                Delimiter: '/',
-              }).promise();
-              
-              const coreografias = await Promise.all(
-                (coreografiasData.CommonPrefixes || []).map(async (p) => {
-                  const nome = p.Prefix.replace(`${evento}/${dia}/`, '').replace('/', '');
-                  const pastaCoreografia = `${evento}/${dia}/${nome}/`;
-                  
-                  // Conta fotos recursivamente
-                  const quantidade = await contarFotosRecursivo(pastaCoreografia);
-                  
-                  // Lista objetos para pegar capa
-                  const objetos = await s3.listObjectsV2({
-                    Bucket: bucket,
-                    Prefix: pastaCoreografia,
-                  }).promise();
-                  
-                  const fotos = objetos.Contents.filter(obj =>
-                    /\.(jpe?g|png|webp)$/i.test(obj.Key)
-                  );
-                  
-                  const imagemCapa = fotos.length > 0
-                    ? gerarUrlAssinada(fotos[0].Key, 7200)
-                    : '/img/sem_capa.jpg';
-                  
-                  return {
-                    nome,
-                    capa: imagemCapa,
-                    quantidade,
-                  };
-                })
-              );
-              
-              // console.log(`✅ ${coreografias.length} coreografias encontradas no dia ${dia}`);
-              
-              // Pré-carrega fotos de todas as coreografias
-              for (const coreografia of coreografias) {
-                try {
-                  const fotos = await listarFotosPorCaminho(`${evento}/${dia}/${coreografia.nome}`);
-                  // console.log(`✅ ${fotos.length} fotos carregadas: ${evento}/${dia}/${coreografia.nome}`);
-                } catch (error) {
-                  // console.error(`❌ Erro ao carregar fotos ${coreografia.nome}:`, error.message);
-                }
-              }
-            } catch (error) {
-              // console.error(`❌ Erro ao processar dia ${dia}:`, error.message);
-            }
+          // Verifica estrutura do evento
+          const estrutura = await analisarEstrutraEvento(evento);
+          
+          if (estrutura.temDias) {
+            // Evento multi-dia: carrega só o primeiro dia
+            const primeiroDia = estrutura.dias[0];
+            await listarCoreografias(evento, primeiroDia);
+            console.log(`✅ Coreografias pré-carregadas: ${evento}/${primeiroDia}`);
+          } else {
+            // Evento simples: carrega tudo
+            await listarCoreografias(evento);
+            console.log(`✅ Coreografias pré-carregadas: ${evento}`);
           }
-        } else {
-          // Evento de um dia - varredura completa
-          // console.log(`🔄 Varredura de evento simples: ${evento}`);
-          
-          // Lista coreografias diretamente
-          const coreografiasData = await s3.listObjectsV2({
-            Bucket: bucket,
-            Prefix: `${evento}/`,
-            Delimiter: '/',
-          }).promise();
-          
-          const coreografias = await Promise.all(
-            (coreografiasData.CommonPrefixes || []).map(async (p) => {
-              const nome = p.Prefix.replace(`${evento}/`, '').replace('/', '');
-              const pastaCoreografia = `${evento}/${nome}/`;
-              
-              // Conta fotos recursivamente
-              const quantidade = await contarFotosRecursivo(pastaCoreografia);
-              
-              // Lista objetos para pegar capa
-              const objetos = await s3.listObjectsV2({
-                Bucket: bucket,
-                Prefix: pastaCoreografia,
-              }).promise();
-              
-              const fotos = objetos.Contents.filter(obj =>
-                /\.(jpe?g|png|webp)$/i.test(obj.Key)
-              );
-              
-              const imagemCapa = fotos.length > 0
-                ? gerarUrlAssinada(fotos[0].Key, 7200)
-                : '/img/sem_capa.jpg';
-              
-              return {
-                nome,
-                capa: imagemCapa,
-                quantidade,
-              };
-            })
-          );
-          
-          // console.log(`✅ ${coreografias.length} coreografias encontradas no evento ${evento}`);
-          
-          // Pré-carrega fotos de todas as coreografias
-          for (const coreografia of coreografias) {
-            try {
-              const fotos = await listarFotos(evento, coreografia.nome);
-              // console.log(`✅ ${fotos.length} fotos carregadas da coreografia ${coreografia.nome}`);
-            } catch (error) {
-              // console.error(`❌ Erro ao carregar fotos ${coreografia.nome}:`, error.message);
-            }
-          }
+        } catch (error) {
+          console.error(`❌ Erro ao pré-carregar ${evento}:`, error.message);
         }
-      } catch (error) {
-        // console.error(`❌ Erro ao processar evento ${evento}:`, error.message);
-      }
-    });
+      })
+    );
     
-    await Promise.allSettled(preloadPromises);
-    // console.log('🎉 Varredura completa concluída! Todos os dados foram atualizados.');
+    console.log('✅ Pré-carregamento concluído com sucesso!');
+    return true;
   } catch (error) {
-    // console.error('❌ Erro na varredura completa:', error);
+    console.error('❌ Erro no pré-carregamento:', error);
+    return false;
   }
 }
 
-// Função otimizada para listar fotos por caminho completo
+// Nova função para analisar estrutura do evento
+async function analisarEstrutraEvento(evento) {
+  const cacheKey = `estrutura:${evento}`;
+  
+  try {
+    let estrutura = await getFromCache(cacheKey, true);
+    
+    if (!estrutura) {
+      const data = await s3.listObjectsV2({
+        Bucket: bucket,
+        Prefix: `${evento}/`,
+        Delimiter: '/',
+        MaxKeys: 20
+      }).promise();
+      
+      const dias = (data.CommonPrefixes || [])
+        .map(prefix => prefix.Prefix.replace(`${evento}/`, '').replace('/', ''))
+        .filter(nome => /^\d{2}-\d{2}-/.test(nome))
+        .sort();
+      
+      estrutura = {
+        temDias: dias.length > 0,
+        dias,
+        totalPastas: (data.CommonPrefixes || []).length
+      };
+      
+      // Cache por 2 horas (estrutura muda raramente)
+      await setCache(cacheKey, estrutura, 7200, true);
+    }
+    
+    return estrutura;
+  } catch (error) {
+    console.error('Erro ao analisar estrutura:', error);
+    return { temDias: false, dias: [], totalPastas: 0 };
+  }
+}
+
+// Função otimizada para listar fotos por caminho completo (compatibilidade)
 async function listarFotosPorCaminho(caminho) {
-  const cacheKey = generateCacheKey('caminho', caminho, 'fotos');
+  // Adicionar versão para invalidar cache após correção de ordenação
+  const version = 'v2_ordenacao_corrigida';
+  const cacheKey = generateCacheKey('caminho_fotos', version, caminho);
   
-  // Tenta obter do cache primeiro
-  let fotos = await getFromCache(cacheKey);
-  
-  if (!fotos) {
-    try {
+  try {
+    // Tenta cache primeiro
+    let fotos = await getFromCache(cacheKey, true);
+    
+    if (!fotos) {
       const prefix = `${caminho}/`;
       const data = await s3.listObjectsV2({
         Bucket: bucket,
         Prefix: prefix,
+        MaxKeys: 1000 // Limite para performance
       }).promise();
-
-      // Monta URLs assinadas para garantir acesso correto
-      fotos = (data.Contents || [])
+      
+      // Filtrar e ordenar fotos
+      const fotosAOrdenar = (data.Contents || [])
         .filter(obj => !obj.Key.endsWith('/'))
-        .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
-        .map(obj => {
-          const nomeArquivo = obj.Key.replace(prefix, '');
-          // Usar URL assinada para garantir acesso correto
-          const urlAssinada = gerarUrlAssinada(obj.Key, 7200); // 2 horas
-          
-          return {
-            nome: nomeArquivo,
-            url: urlAssinada,
-          };
-        });
+        .filter(obj => /\.(jpe?g|png|webp|gif)$/i.test(obj.Key));
+      
+      const fotosOrdenadas = ordenarFotosPorNumero(fotosAOrdenar);
+      
+      // Gera URLs otimizadas
+      const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
+      fotos = fotosOrdenadas.map(obj => {
+        const nomeArquivo = obj.Key.replace(prefix, '');
+        const urlPath = obj.Key.split('/').map(parte => encodeURIComponent(parte)).join('/');
+        
+        return {
+          nome: nomeArquivo,
+          url: `${endpoint}/${bucket}/${urlPath}`,
+          key: obj.Key,
+          size: obj.Size,
+          lastModified: obj.LastModified
+        };
+      });
 
-      // Salva no cache por 1 hora
-      await setCache(cacheKey, fotos, 3600);
-    } catch (error) {
-      console.error('Erro ao listar fotos por caminho:', error);
-      throw error;
-    }
-  }
-  
-  return fotos;
-}
-
-// Função para aquecer cache de um evento específico
-async function aquecerCacheEvento(evento) {
-  try {
-    console.log(`🔥 Aquecendo cache do evento: ${evento}`);
-    
-    // Verifica estrutura do evento
-    const data = await s3.listObjectsV2({
-      Bucket: bucket,
-      Prefix: `${evento}/`,
-      Delimiter: '/',
-    }).promise();
-    
-    const prefixes = (data.CommonPrefixes || [])
-      .map(prefix => prefix.Prefix.replace(`${evento}/`, '').replace('/', ''));
-    
-    const dias = prefixes.filter(nome => /^\d{2}-\d{2}-/.test(nome));
-    
-    if (dias.length > 0) {
-      // Evento multi-dia
-      for (const dia of dias) {
-        await listarCoreografias(evento, dia);
-      }
-    } else {
-      // Evento de um dia
-      await listarCoreografias(evento);
+      // Cache inteligente baseado no tamanho
+      await smartCache(cacheKey, fotos, 3600, 'auto');
     }
     
-    console.log(`✅ Cache aquecido para evento: ${evento}`);
+    return fotos;
   } catch (error) {
-    console.error(`❌ Erro ao aquecer cache do evento ${evento}:`, error);
+    console.error('Erro ao listar fotos por caminho:', error);
+    throw error;
   }
 }
 
-module.exports = { 
-  s3, 
-  bucket, 
+module.exports = {
+  s3,
+  bucket,
   gerarUrlAssinada,
   listarEventos,
   listarCoreografias,
   listarFotos,
   listarFotosPorCaminho,
+  contarFotosRecursivo,
   preCarregarDadosPopulares,
-  aquecerCacheEvento,
-  contarFotosRecursivo // garantir exportação
+  analisarEstrutraEvento,
+  obterPrimeiraFoto,
+  ordenarFotosPorNumero
 };

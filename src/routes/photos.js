@@ -6,13 +6,19 @@ const {
   listarFotos,
   listarFotosPorCaminho,
   preCarregarDadosPopulares,
-  aquecerCacheEvento,
+  analisarEstrutraEvento,
   s3,
   bucket,
   gerarUrlAssinada,
   contarFotosRecursivo
 } = require('../services/minio');
 const { invalidateCache, generateCacheKey } = require('../services/cache');
+const { 
+  cacheMiddleware, 
+  invalidateCacheMiddleware, 
+  warmupCacheMiddleware,
+  performanceMiddleware 
+} = require('../middleware/cacheMiddleware');
 const rekognitionService = require('../services/rekognition');
 const minioService = require('../services/minio');
 const path = require('path');
@@ -24,6 +30,9 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024 // 10MB limite
   }
 });
+
+// Middleware global para performance
+router.use(performanceMiddleware());
 
 // Função para normalizar nome do evento (mesmo padrão usado no admin.js)
 function normalizarNomeEvento(nomeEvento) {
@@ -70,82 +79,93 @@ function authMiddleware(req, res, next) {
 }
 
 // Listar eventos (pastas raiz no bucket)
-router.get('/eventos', async (req, res) => {
-  try {
-    const eventos = await listarEventos();
-    
-    // Aquece cache do primeiro evento em background
-    if (eventos.length > 0) {
-      setTimeout(() => {
-        aquecerCacheEvento(eventos[0]);
-      }, 100);
+router.get('/eventos', 
+  cacheMiddleware('eventos'), 
+  warmupCacheMiddleware(preCarregarDadosPopulares),
+  async (req, res) => {
+    try {
+      const eventos = await listarEventos();
+      res.json({ eventos });
+    } catch (error) {
+      console.error('Erro ao listar eventos:', error);
+      res.status(500).json({ error: 'Erro ao listar eventos' });
     }
-    
-    res.json({ eventos });
-  } catch (error) {
-    console.error('Erro ao listar eventos:', error);
-    res.status(500).json({ error: 'Erro ao listar eventos' });
   }
-});
+);
 
 // Lista coreografias dentro de um evento
-router.get('/eventos/:evento/coreografias', async (req, res) => {
-  const evento = req.params.evento;
+router.get('/eventos/:evento/coreografias', 
+  cacheMiddleware('coreografias'),
+  async (req, res) => {
+    const evento = req.params.evento;
 
-  try {
-    const coreografias = await listarCoreografias(evento);
-    res.json({ coreografias });
-  } catch (error) {
-    console.error('Erro ao listar coreografias:', error);
-    res.status(500).json({ error: 'Erro ao listar coreografias' });
+    try {
+      const coreografias = await listarCoreografias(evento);
+      res.json({ coreografias });
+    } catch (error) {
+      console.error('Erro ao listar coreografias:', error);
+      res.status(500).json({ error: 'Erro ao listar coreografias' });
+    }
   }
-});
+);
 
 // Lista coreografias dentro de um dia específico de um evento
-router.get('/eventos/:evento/:dia/coreografias', async (req, res) => {
-  const { evento, dia } = req.params;
+router.get('/eventos/:evento/:dia/coreografias', 
+  cacheMiddleware('coreografias'),
+  async (req, res) => {
+    const { evento, dia } = req.params;
 
-  try {
-    const coreografias = await listarCoreografias(evento, dia);
-    res.json({ coreografias });
-  } catch (error) {
-    console.error('Erro ao listar coreografias do dia:', error);
-    res.status(500).json({ error: 'Erro ao listar coreografias do dia' });
+    try {
+      const coreografias = await listarCoreografias(evento, dia);
+      res.json({ coreografias });
+    } catch (error) {
+      console.error('Erro ao listar coreografias do dia:', error);
+      res.status(500).json({ error: 'Erro ao listar coreografias do dia' });
+    }
   }
-});
+);
 
-// Lista fotos dentro de uma coreografia
-router.get('/eventos/:evento/:coreografia/fotos', async (req, res) => {
-  const { evento, coreografia } = req.params;
+// Lista fotos dentro de uma coreografia com paginação
+router.get('/eventos/:evento/:coreografia/fotos', 
+  cacheMiddleware('fotos'),
+  async (req, res) => {
+    const { evento, coreografia } = req.params;
+    const { page = 1, limit = 50 } = req.query;
 
-  try {
-    const fotos = await listarFotos(evento, coreografia);
-    res.json({ fotos });
-  } catch (error) {
-    console.error('Erro ao listar fotos:', error);
-    res.status(500).json({ error: 'Erro ao listar fotos' });
+    try {
+      const resultado = await listarFotos(evento, coreografia, null, parseInt(page), parseInt(limit));
+      res.json(resultado);
+    } catch (error) {
+      console.error('Erro ao listar fotos:', error);
+      res.status(500).json({ error: 'Erro ao listar fotos' });
+    }
   }
-});
+);
 
-// Lista fotos dentro de uma coreografia de um dia específico
-router.get('/eventos/:evento/:dia/:coreografia/fotos', async (req, res) => {
-  const { evento, dia, coreografia } = req.params;
+// Lista fotos dentro de uma coreografia de um dia específico com paginação
+router.get('/eventos/:evento/:dia/:coreografia/fotos', 
+  cacheMiddleware('fotos'),
+  async (req, res) => {
+    const { evento, dia, coreografia } = req.params;
+    const { page = 1, limit = 50 } = req.query;
 
-  try {
-    console.log('[Fotos Dia] Parâmetros:', { evento, dia, coreografia });
-    const fotos = await listarFotos(evento, coreografia, dia);
-    console.log('[Fotos Dia] Fotos encontradas:', fotos.length);
-    res.json({ fotos });
-  } catch (error) {
-    console.error('Erro ao listar fotos do dia:', error);
-    res.status(500).json({ error: 'Erro ao listar fotos do dia' });
+    try {
+      console.log('[Fotos Dia] Parâmetros:', { evento, dia, coreografia, page, limit });
+      const resultado = await listarFotos(evento, coreografia, dia, parseInt(page), parseInt(limit));
+      console.log('[Fotos Dia] Fotos encontradas:', resultado.fotos.length, 'de', resultado.pagination.total);
+      res.json(resultado);
+    } catch (error) {
+      console.error('Erro ao listar fotos do dia:', error);
+      res.status(500).json({ error: 'Erro ao listar fotos do dia' });
+    }
   }
-});
+);
 
 // Rota para navegação genérica de pastas usando POST
 router.post('/eventos/pasta', async (req, res) => {
   try {
     const { caminho } = req.body;
+    console.log('[PHOTOS.JS] Rota /eventos/pasta chamada com caminho:', caminho);
     console.log('[Pasta] Caminho recebido:', caminho);
     
     // Buscar subpastas e fotos no caminho
@@ -162,22 +182,29 @@ router.post('/eventos/pasta', async (req, res) => {
         const nome = p.Prefix.replace(prefix, '').replace('/', '');
         // Contar fotos recursivamente na subpasta
         const quantidade = await contarFotosRecursivo(p.Prefix);
-        // Buscar capa
+        // Buscar primeira foto ordenada para capa
         const objetos = await s3.listObjectsV2({
           Bucket: bucket,
           Prefix: p.Prefix,
+          MaxKeys: 50 // Buscar mais para garantir ordenação correta
         }).promise();
         const fotos = objetos.Contents.filter(obj =>
-          /\.(jpe?g|png|webp)$/i.test(obj.Key)
+          !obj.Key.endsWith('/') && /\.(jpe?g|png|webp)$/i.test(obj.Key)
         );
-        const imagemAleatoria = fotos.length > 0
-          ? gerarUrlAssinada(fotos[Math.floor(Math.random() * fotos.length)].Key, 7200)
-          : '/img/sem_capa.jpg';
-        return {
-          nome,
-          capa: imagemAleatoria,
-          quantidade,
-        };
+        
+        let imagemCapa = '/img/sem_capa.jpg';
+        if (fotos.length > 0) {
+          // Usar a função de ordenação para garantir que a primeira foto seja correta
+          const { ordenarFotosPorNumero } = require('../services/minio');
+          const fotosOrdenadas = ordenarFotosPorNumero(fotos);
+          imagemCapa = gerarUrlAssinada(fotosOrdenadas[0].Key, 7200);
+          console.log(`[CAPA] Pasta: ${nome} - Primeira foto ordenada: ${fotosOrdenadas[0].Key}`);
+        }
+                  return {
+            nome,
+            capa: imagemCapa,
+            quantidade,
+          };
       })
     );
 
@@ -187,13 +214,21 @@ router.post('/eventos/pasta', async (req, res) => {
       console.error('[FATAL] Variável de ambiente MINIO_ENDPOINT não definida!');
     }
 
-    const fotos = (data.Contents || [])
+    // Filtrar e ordenar fotos usando a mesma lógica do minio.js
+    const fotosParaOrdenar = (data.Contents || [])
       .filter(obj => !obj.Key.endsWith('/'))
-      .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i))
-      .map(obj => ({
-        nome: obj.Key.replace(prefix, ''),
-        url: `${endpoint}/${bucket}/${encodeURIComponent(obj.Key)}`,
-      }));
+      .filter(obj => obj.Key.match(/\.(jpe?g|png|gif|webp)$/i));
+
+      // Importar e usar a função de ordenação do minio.js
+  const { ordenarFotosPorNumero } = require('../services/minio');
+  console.log('[PASTA] 🔢 Antes da ordenação - primeiras 10 fotos:', fotosParaOrdenar.slice(0, 10).map(f => f.Key));
+  const fotosOrdenadas = ordenarFotosPorNumero(fotosParaOrdenar);
+  console.log('[PASTA] ✅ Após ordenação - primeiras 10 fotos:', fotosOrdenadas.slice(0, 10).map(f => f.Key));
+
+    const fotos = fotosOrdenadas.map(obj => ({
+      nome: obj.Key.replace(prefix, ''),
+      url: `${endpoint}/${bucket}/${encodeURIComponent(obj.Key)}`,
+    }));
 
     res.json({ subpastas, fotos });
   } catch (error) {
@@ -214,20 +249,15 @@ router.post('/pre-carregar', async (req, res) => {
   }
 });
 
-// Rota para aquecer cache de um evento específico
-router.post('/eventos/:evento/aquecer-cache', async (req, res) => {
+// Rota para analisar estrutura de um evento
+router.get('/eventos/:evento/estrutura', async (req, res) => {
   try {
     const { evento } = req.params;
-    
-    // Executa em background para não bloquear a resposta
-    setTimeout(() => {
-      aquecerCacheEvento(evento);
-    }, 100);
-    
-    res.json({ message: `Cache sendo aquecido para o evento: ${evento}` });
+    const estrutura = await analisarEstrutraEvento(evento);
+    res.json(estrutura);
   } catch (error) {
-    console.error(`Erro detalhado ao aquecer cache para o evento ${req.params.evento}:`, error); // Log mais detalhado
-    res.status(500).json({ error: 'Erro ao aquecer cache' });
+    console.error(`Erro ao analisar estrutura do evento ${req.params.evento}:`, error);
+    res.status(500).json({ error: 'Erro ao analisar estrutura do evento' });
   }
 });
 
@@ -245,26 +275,197 @@ router.delete('/cache', async (req, res) => {
   }
 });
 
-// Rota para estatísticas de cache (debug)
+// Rota para estatísticas detalhadas do cache
 router.get('/cache/stats', async (req, res) => {
   try {
-    const { memoryCache } = require('../services/cache');
-    const stats = memoryCache.getStats();
+    const { getCacheStats, isCacheAvailable } = require('../services/cache');
+    const stats = getCacheStats();
+    const health = isCacheAvailable();
     
     res.json({
-      memoryCache: {
-        keys: stats.keys,
-        hits: stats.hits,
-        misses: stats.misses,
-        keyCount: stats.keyCount
-      },
-      message: 'Estatísticas do cache em memória'
+      stats,
+      health,
+      timestamp: new Date().toISOString(),
+      message: 'Estatísticas completas do sistema de cache'
     });
   } catch (error) {
     console.error('Erro ao obter estatísticas:', error);
     res.status(500).json({ error: 'Erro ao obter estatísticas' });
   }
 });
+
+// === ENDPOINTS OTIMIZADOS PARA BATCH REQUESTS ===
+
+// Buscar múltiplas coreografias em paralelo
+router.post('/batch/coreografias', 
+  cacheMiddleware('coreografias'),
+  async (req, res) => {
+    try {
+      const { requests } = req.body; // [{ evento, dia? }]
+      
+      if (!Array.isArray(requests) || requests.length === 0) {
+        return res.status(400).json({ error: 'Array de requests é obrigatório' });
+      }
+      
+      if (requests.length > 10) {
+        return res.status(400).json({ error: 'Máximo 10 requests por batch' });
+      }
+      
+      const results = await Promise.all(
+        requests.map(async ({ evento, dia }) => {
+          try {
+            const coreografias = await listarCoreografias(evento, dia);
+            return { evento, dia, coreografias, success: true };
+          } catch (error) {
+            return { evento, dia, error: error.message, success: false };
+          }
+        })
+      );
+      
+      res.json({ results });
+    } catch (error) {
+      console.error('Erro no batch de coreografias:', error);
+      res.status(500).json({ error: 'Erro no batch de coreografias' });
+    }
+  }
+);
+
+// Buscar metadados de múltiplas fotos
+router.post('/batch/fotos-metadata', 
+  cacheMiddleware('metadados'),
+  async (req, res) => {
+    try {
+      const { requests } = req.body; // [{ evento, dia?, coreografia, page?, limit? }]
+      
+      if (!Array.isArray(requests) || requests.length === 0) {
+        return res.status(400).json({ error: 'Array de requests é obrigatório' });
+      }
+      
+      if (requests.length > 5) {
+        return res.status(400).json({ error: 'Máximo 5 requests por batch para fotos' });
+      }
+      
+      const results = await Promise.all(
+        requests.map(async ({ evento, dia, coreografia, page = 1, limit = 50 }) => {
+          try {
+            const resultado = await listarFotos(evento, coreografia, dia, page, limit);
+            return { 
+              evento, 
+              dia, 
+              coreografia, 
+              page, 
+              metadata: {
+                total: resultado.pagination.total,
+                pages: resultado.pagination.totalPages,
+                hasNext: resultado.pagination.hasNext,
+                hasPrev: resultado.pagination.hasPrev,
+                count: resultado.fotos.length
+              }, 
+              success: true 
+            };
+          } catch (error) {
+            return { evento, dia, coreografia, error: error.message, success: false };
+          }
+        })
+      );
+      
+      res.json({ results });
+    } catch (error) {
+      console.error('Erro no batch de metadados:', error);
+      res.status(500).json({ error: 'Erro no batch de metadados' });
+    }
+  }
+);
+
+// Endpoint otimizado para thumbnails
+router.get('/thumbnails/:evento/:coreografia', 
+  cacheMiddleware('thumbnails'),
+  async (req, res) => {
+    try {
+      const { evento, coreografia } = req.params;
+      const { dia, count = 6 } = req.query; // Limita a 6 thumbnails por padrão
+      
+      const maxCount = Math.min(parseInt(count), 20); // Máximo 20 thumbnails
+      
+      const resultado = await listarFotos(evento, coreografia, dia, 1, maxCount);
+      
+      // Retorna apenas URLs e metadados básicos para thumbnails
+      const thumbnails = resultado.fotos.map(foto => ({
+        nome: foto.nome,
+        url: foto.url,
+        thumb: foto.url // TODO: Implementar thumbnails reais se necessário
+      }));
+      
+      res.json({ 
+        evento,
+        coreografia,
+        dia,
+        thumbnails,
+        total: resultado.pagination.total 
+      });
+    } catch (error) {
+      console.error('Erro ao buscar thumbnails:', error);
+      res.status(500).json({ error: 'Erro ao buscar thumbnails' });
+    }
+  }
+);
+
+// Endpoint para estrutura completa de um evento (navegação rápida)
+router.get('/estrutura/:evento', 
+  cacheMiddleware('metadados'),
+  async (req, res) => {
+    try {
+      const { evento } = req.params;
+      
+      // Analisa estrutura do evento
+      const estrutura = await analisarEstrutraEvento(evento);
+      
+      let navegacao = {};
+      
+      if (estrutura.temDias) {
+        // Evento multi-dia - busca coreografias de cada dia
+        navegacao = await Promise.all(
+          estrutura.dias.map(async (dia) => {
+            try {
+              const coreografias = await listarCoreografias(evento, dia);
+              return {
+                dia,
+                coreografias: coreografias.map(c => ({
+                  nome: c.nome,
+                  quantidade: c.quantidade,
+                  temCapa: !!c.capa && !c.capa.includes('sem_capa')
+                }))
+              };
+            } catch (error) {
+              return { dia, error: error.message };
+            }
+          })
+        );
+      } else {
+        // Evento single-dia
+        const coreografias = await listarCoreografias(evento);
+        navegacao = {
+          tipo: 'single-dia',
+          coreografias: coreografias.map(c => ({
+            nome: c.nome,
+            quantidade: c.quantidade,
+            temCapa: !!c.capa && !c.capa.includes('sem_capa')
+          }))
+        };
+      }
+      
+      res.json({
+        evento,
+        estrutura,
+        navegacao,
+        gerado: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('Erro ao buscar estrutura:', error);
+      res.status(500).json({ error: 'Erro ao buscar estrutura' });
+    }
+  }
+);
 
 // Buscar fotos por selfie (reconhecimento facial)
 router.post('/fotos/buscar-por-selfie', (req, res, next) => {

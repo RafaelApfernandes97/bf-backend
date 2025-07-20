@@ -28,10 +28,47 @@ const pedidoSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  // Campos do cupom de desconto
+  cupom: {
+    codigo: String,
+    descricao: String,
+    desconto: Number, // Valor do desconto aplicado
+    cupomId: { type: mongoose.Schema.Types.ObjectId, ref: 'Cupom' }
+  },
   status: {
     type: String,
-    enum: ['pendente', 'confirmado', 'cancelado', 'pago', 'entregue'],
+    enum: ['pendente', 'pago', 'preparando_pedido', 'enviado', 'cancelado'],
     default: 'pendente'
+  },
+  // Campos de nota fiscal
+  numeroNotaFiscal: {
+    type: String,
+    default: ''
+  },
+  periodoNotaFiscal: {
+    type: String,
+    default: ''
+  },
+  statusNotaFiscal: {
+    type: String,
+    enum: ['pendente', 'cpf_invalido', 'cpf_validado', 'concluido'],
+    default: 'pendente'
+  },
+  // Campos de desconto
+  desconto: {
+    tipo: {
+      type: String,
+      enum: ['valor', 'percentual']
+    },
+    valor: Number
+  },
+  valorDesconto: {
+    type: Number,
+    default: 0
+  },
+  valorEditadoManualmente: {
+    type: Boolean,
+    default: false
   },
   dataCriacao: {
     type: Date,
@@ -48,7 +85,11 @@ const pedidoSchema = new mongoose.Schema({
     },
     acao: {
       type: String,
-      enum: ['criado', 'status_alterado', 'valor_alterado', 'item_adicionado', 'item_removido', 'editado'],
+      enum: [
+        'criado', 'status_alterado', 'valor_alterado', 'item_adicionado', 'item_removido', 'editado',
+        'mensagem_enviada', 'nota_fiscal_atualizada', 'status_nota_fiscal_atualizado', 
+        'dados_usuario_editados', 'desconto_aplicado', 'valor_final_editado'
+      ],
       required: true
     },
     descricao: String,

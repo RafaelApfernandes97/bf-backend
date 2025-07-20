@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const { initRedis } = require('./services/cache');
 const { preCarregarDadosPopulares } = require('./services/minio');
 const mongoose = require('mongoose');
@@ -38,6 +39,20 @@ const corsOptions = {
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 };
+
+// Middleware de compressão (deve vir antes dos outros)
+app.use(compression({
+  filter: (req, res) => {
+    // Não comprime se o request já especifica que não quer compressão
+    if (req.headers['x-no-compression']) {
+      return false;
+    }
+    // Usa filtro padrão do compression
+    return compression.filter(req, res);
+  },
+  threshold: 1024, // Só comprime dados > 1KB
+  level: 6, // Nível de compressão balanceado
+}));
 
 app.use(cors(corsOptions));
 app.use(express.json());
