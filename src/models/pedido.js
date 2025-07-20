@@ -18,7 +18,8 @@ const pedidoSchema = new mongoose.Schema({
   fotos: [{
     nome: String,
     url: String,
-    coreografia: String
+    coreografia: String,
+    codigo: String // Código da imagem para banners (vale/vídeo/poster)
   }],
   valorUnitario: {
     type: Number,

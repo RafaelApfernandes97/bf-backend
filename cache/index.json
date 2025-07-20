@@ -1,20 +1,11 @@
 {
   "6423f16e28c13c31fb771a26b568664d6e4f3f187f29d7ae775238b192cc3d02": {
     "file": "metadata\\6423f16e28c13c31fb771a26b568664d6e4f3f187f29d7ae775238b192cc3d02.cache",
-    "size": 94,
-    "lastAccess": 1753021105095,
-    "created": 1753012352595,
+    "size": 102,
+    "lastAccess": 1753027483029,
+    "created": 1753027057888,
     "ttl": 14400000,
     "compressed": false,
-    "dataType": "metadata"
-  },
-  "c7f00a8f785ce16a80ba24d4d80373e06a280cbe728eb60889ba5f2989dee58d": {
-    "file": "metadata\\c7f00a8f785ce16a80ba24d4d80373e06a280cbe728eb60889ba5f2989dee58d.cache",
-    "size": 3019,
-    "lastAccess": 1753021347848,
-    "created": 1753021347848,
-    "ttl": 5400000,
-    "compressed": true,
     "dataType": "metadata"
   }
 }

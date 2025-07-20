@@ -255,7 +255,8 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
       if (valebanner.length > 0) {
         valebanner.forEach(item => {
           const valor = Number(item.valor) || Number(item.preco) || 0;
-          itensDetalhados += `• ${item.nome} - R$ ${valor.toFixed(2).replace('.', ',')}\n`;
+          const codigo = item.codigo ? ` (Cód: ${item.codigo})` : '';
+          itensDetalhados += `• ${item.nome}${codigo} - R$ ${valor.toFixed(2).replace('.', ',')}\n`;
         });
       }
       
@@ -263,7 +264,8 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
       if (videoBanner.length > 0) {
         videoBanner.forEach(item => {
           const valor = Number(item.valor) || Number(item.preco) || 0;
-          itensDetalhados += `• ${item.nome} - R$ ${valor.toFixed(2).replace('.', ',')}\n`;
+          const codigo = item.codigo ? ` (Cód: ${item.codigo})` : '';
+          itensDetalhados += `• ${item.nome}${codigo} - R$ ${valor.toFixed(2).replace('.', ',')}\n`;
         });
       }
       
@@ -271,7 +273,8 @@ router.post('/enviar-pedido-whatsapp', authMiddleware, async (req, res) => {
       if (posterBanner.length > 0) {
         posterBanner.forEach(item => {
           const valor = Number(item.valor) || Number(item.preco) || 0;
-          itensDetalhados += `• ${item.nome} - R$ ${valor.toFixed(2).replace('.', ',')}\n`;
+          const codigo = item.codigo ? ` (Cód: ${item.codigo})` : '';
+          itensDetalhados += `• ${item.nome}${codigo} - R$ ${valor.toFixed(2).replace('.', ',')}\n`;
         });
       }
     }
