@@ -12,7 +12,12 @@ const EventoSchema = new mongoose.Schema({
   bannerPoster: { type: Boolean, default: false },
   valorVale: { type: Number, default: 0 },
   valorVideo: { type: Number, default: 0 },
-  valorPoster: { type: Number, default: 0 }
+  valorPoster: { type: Number, default: 0 },
+  // Campo para armazenar as pastas selecionadas como dias do evento
+  diasSelecionados: { 
+    type: [String], 
+    default: [] // Array de nomes das pastas que serão exibidas como dias na navegação
+  }
 }, { timestamps: true });
 
 module.exports = mongoose.model('Evento', EventoSchema); 

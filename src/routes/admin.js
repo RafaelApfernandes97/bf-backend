@@ -94,7 +94,7 @@ router.get('/eventos', authMiddleware, async (req, res) => {
 });
 
 router.post('/eventos', authMiddleware, async (req, res) => {
-  const { nome, data, local, tabelaPrecoId, valorFixo, bannerVale, bannerVideo, bannerPoster, valorVale, valorVideo, valorPoster } = req.body;
+  const { nome, data, local, tabelaPrecoId, valorFixo, bannerVale, bannerVideo, bannerPoster, valorVale, valorVideo, valorPoster, diasSelecionados } = req.body;
   const evento = await Evento.create({ 
     nome, 
     data, 
@@ -106,14 +106,15 @@ router.post('/eventos', authMiddleware, async (req, res) => {
     bannerPoster: !!bannerPoster,
     valorVale: valorVale || 0,
     valorVideo: valorVideo || 0,
-    valorPoster: valorPoster || 0
+    valorPoster: valorPoster || 0,
+    diasSelecionados: diasSelecionados || []
   });
   await evento.populate('tabelaPrecoId');
   res.json(evento);
 });
 
 router.put('/eventos/:id', authMiddleware, async (req, res) => {
-  const { nome, data, local, tabelaPrecoId, valorFixo, bannerVale, bannerVideo, bannerPoster, valorVale, valorVideo, valorPoster } = req.body;
+  const { nome, data, local, tabelaPrecoId, valorFixo, bannerVale, bannerVideo, bannerPoster, valorVale, valorVideo, valorPoster, diasSelecionados } = req.body;
   const evento = await Evento.findByIdAndUpdate(req.params.id, { 
     nome, 
     data, 
@@ -125,7 +126,8 @@ router.put('/eventos/:id', authMiddleware, async (req, res) => {
     bannerPoster: !!bannerPoster,
     valorVale: valorVale || 0,
     valorVideo: valorVideo || 0,
-    valorPoster: valorPoster || 0
+    valorPoster: valorPoster || 0,
+    diasSelecionados: diasSelecionados || []
   }, { new: true });
   await evento.populate('tabelaPrecoId');
   res.json(evento);
@@ -156,6 +158,34 @@ router.get('/eventos-minio', authMiddleware, async (req, res) => {
     res.json(eventos);
   } catch (e) {
     res.status(500).json({ error: 'Erro ao listar eventos do MinIO' });
+  }
+});
+
+// Lista pastas de um evento específico no MinIO (para seleção de dias)
+router.get('/eventos-minio/:eventoNome/pastas', authMiddleware, async (req, res) => {
+  try {
+    const { eventoNome } = req.params;
+    const { s3, bucket } = minioService;
+    
+    // Buscar subpastas do evento
+    const prefix = `${eventoNome}/`;
+    const data = await s3.listObjectsV2({
+      Bucket: bucket,
+      Prefix: prefix,
+      Delimiter: '/',
+      MaxKeys: 100
+    }).promise();
+
+    // Processar pastas encontradas
+    const pastas = (data.CommonPrefixes || []).map(p => {
+      const nome = p.Prefix.replace(prefix, '').replace('/', '');
+      return { nome };
+    });
+
+    res.json(pastas);
+  } catch (error) {
+    console.error('Erro ao listar pastas do evento:', error);
+    res.status(500).json({ error: 'Erro ao listar pastas do evento' });
   }
 });
 
