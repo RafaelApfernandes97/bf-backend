@@ -307,7 +307,8 @@ router.post('/eventos/:eventoId/dias/:diaNome/capa', authMiddleware, upload.sing
     }).promise();
     
     // Gerar URL pública da imagem (sem assinatura)
-    const urlCapa = `${process.env.MINIO_ENDPOINT}/${bucket}/${nomeArquivo}`;
+    const { gerarUrlPublica } = require('../services/minio');
+    const urlCapa = gerarUrlPublica(nomeArquivo);
     
     // Atualizar o evento com a URL da capa
     if (!evento.capasDias) {

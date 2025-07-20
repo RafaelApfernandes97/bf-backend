@@ -33,6 +33,11 @@ const URL_CACHE_TTL = 2 * 60 * 60 * 1000; // 2 horas em ms
 async function configurarBucketPublico() {
   try {
     console.log('🔧 Configurando bucket para acesso público...');
+    console.log('🔧 Configurações:', {
+      bucket,
+      endpoint: process.env.MINIO_ENDPOINT,
+      accessKey: process.env.MINIO_ACCESS_KEY ? 'Definido' : 'Não definido'
+    });
     
     // Política de bucket para permitir acesso público de leitura
     const bucketPolicy = {
@@ -47,21 +52,20 @@ async function configurarBucketPublico() {
           ],
           Resource: [
             `arn:aws:s3:::${bucket}/*`
-          ],
-          Condition: {
-            StringEquals: {
-              's3:ResourceType': 'object'
-            }
-          }
+          ]
         }
       ]
     };
+
+    console.log('🔧 Aplicando política de bucket:', JSON.stringify(bucketPolicy, null, 2));
 
     // Aplicar política de bucket
     await s3.putBucketPolicy({
       Bucket: bucket,
       Policy: JSON.stringify(bucketPolicy)
     }).promise();
+
+    console.log('✅ Política de bucket aplicada com sucesso');
 
     // Configurar CORS para permitir acesso de qualquer origem
     const corsConfig = {
@@ -79,12 +83,20 @@ async function configurarBucketPublico() {
       }
     };
 
+    console.log('🔧 Aplicando configuração CORS:', JSON.stringify(corsConfig, null, 2));
+
     await s3.putBucketCors(corsConfig).promise();
 
+    console.log('✅ CORS configurado com sucesso');
     console.log('✅ Bucket configurado com sucesso para acesso público');
     return true;
   } catch (error) {
     console.error('❌ Erro ao configurar bucket:', error);
+    console.error('❌ Detalhes do erro:', {
+      message: error.message,
+      code: error.code,
+      statusCode: error.statusCode
+    });
     return false;
   }
 }
@@ -92,7 +104,10 @@ async function configurarBucketPublico() {
 // Função para gerar URL pública direta (sem assinatura)
 function gerarUrlPublica(key) {
   const endpoint = process.env.MINIO_ENDPOINT.replace(/\/$/, '');
-  return `${endpoint}/${bucket}/${encodeURIComponent(key)}`;
+  const encodedKey = encodeURIComponent(key);
+  const url = `${endpoint}/${bucket}/${encodedKey}`;
+  console.log('[MINIO] URL pública gerada:', { key, encodedKey, url });
+  return url;
 }
 
 // Gera URL assinada otimizada com cache inteligente
