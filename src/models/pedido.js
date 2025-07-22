@@ -122,13 +122,26 @@ pedidoSchema.pre('save', function(next) {
 
 // Substituir a função gerarPedidoId para gerar IDs no formato BEF01, BEF02, ...
 pedidoSchema.statics.gerarPedidoId = async function() {
-  // Busca o maior pedidoId já existente que comece com 'BEF' e termina com número
-  const ultimo = await this.findOne({ pedidoId: /^BEF\d+$/ }).sort({ pedidoId: -1 }).select('pedidoId').lean();
+  // Busca todos os pedidoId existentes no formato BEF\d+
+  const pedidos = await this.find({ pedidoId: /^BEF\d+$/ }).select('pedidoId').lean();
+  // Extrai os números dos IDs
+  const numeros = pedidos
+    .map(p => {
+      const match = p.pedidoId.match(/^BEF(\d+)$/);
+      return match ? parseInt(match[1], 10) : null;
+    })
+    .filter(n => n !== null)
+    .sort((a, b) => a - b);
+  // Encontra o menor número disponível na sequência
   let proximoNumero = 1;
-  if (ultimo && typeof ultimo.pedidoId === 'string') {
-    const match = ultimo.pedidoId.match(/^BEF(\d+)$/);
-    if (match) {
-      proximoNumero = parseInt(match[1], 10) + 1;
+  for (let i = 0; i < numeros.length; i++) {
+    if (numeros[i] !== i + 1) {
+      proximoNumero = i + 1;
+      break;
+    }
+    // Se chegou ao fim sem buracos, o próximo é o maior + 1
+    if (i === numeros.length - 1) {
+      proximoNumero = numeros.length + 1;
     }
   }
   // Garante pelo menos dois dígitos
