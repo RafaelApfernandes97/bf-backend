@@ -55,3 +55,4 @@ async function sendOrderSummary({ numero, mensagem }) {
 
 
 module.exports = { sendOrderSummary }; 
+
