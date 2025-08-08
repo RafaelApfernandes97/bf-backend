@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 const EVOLUTION_API_URL = 'https://whatsapp.oballetemfoco.com/';
-const INSTANCE = 'Balletemfoco_2';
+const INSTANCE = 'balletemfoco_bkp';
 const APIKEY = '4LZrB0AxrjYDyr5GwxKSOCIwIf8LI2rp';
 
 async function sendOrderSummary({ numero, mensagem }) {
@@ -52,5 +52,6 @@ async function sendOrderSummary({ numero, mensagem }) {
     throw error; // Re-throw para ser capturado na rota
   }
 }
+
 
 module.exports = { sendOrderSummary }; 
